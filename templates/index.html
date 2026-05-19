@@ -553,6 +553,11 @@
       </div>
     </div>
 
+    <div class="batch-bar" id="localHistoryBar">
+      <span id="localHistoryText">本地历史：0 条</span>
+      <button class="btn-sm danger" onclick="clearLocalHistory()">清除本地历史</button>
+    </div>
+
     <div class="batch-list" id="batchList"></div>
 
     <div id="resultArea">
@@ -574,6 +579,43 @@
   let currentBatchId = '';
   let apiEnabled = false;
   let availableProviders = [];
+
+  // ---------- 本地历史（per-user localStorage 去重）----------
+  const LOCAL_HISTORY_KEY = 'phone_gen_local_history';
+
+  function getLocalHistory() {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(LOCAL_HISTORY_KEY) || '[]'));
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  function saveLocalHistory(historySet) {
+    try {
+      localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify([...historySet]));
+    } catch (e) {
+      // localStorage 可能已满，忽略
+    }
+  }
+
+  function addToLocalHistory(phones) {
+    const history = getLocalHistory();
+    phones.forEach(p => history.add(p));
+    saveLocalHistory(history);
+    updateLocalHistoryCount();
+  }
+
+  function updateLocalHistoryCount() {
+    const count = getLocalHistory().size;
+    document.getElementById('localHistoryText').textContent = `本地历史：${count} 条`;
+  }
+
+  function clearLocalHistory() {
+    localStorage.removeItem(LOCAL_HISTORY_KEY);
+    updateLocalHistoryCount();
+    showToast('本地历史已清除');
+  }
 
   // ---------- 登录 ----------
   document.getElementById('loginPassword').addEventListener('keydown', function(e) {
@@ -644,6 +686,7 @@
         availableProviders.length > 0 ? availableProviders.join(', ') : '无';
 
       toggleOnlineConfig();
+      updateLocalHistoryCount();
     } catch (e) {
       showToast('初始化失败: ' + e.message);
     }
@@ -757,17 +800,29 @@
       });
       const data = await res.json();
       if (!res.ok) { showToast(data.error || '生成失败'); return; }
-      resultData = data.results;
+
+      let finalResults = data.results;
+      let dedupCount = 0;
+      if (commercial_unique) {
+        const localHistory = getLocalHistory();
+        const before = finalResults.length;
+        finalResults = finalResults.filter(r => !localHistory.has(r.phone));
+        dedupCount = before - finalResults.length;
+        addToLocalHistory(finalResults.map(r => r.phone));
+      }
+
+      resultData = finalResults;
       currentBatchId = data.batch_id || '';
       downloadCSV();
+      const dedupNote = dedupCount > 0 ? `，本地去重 ${dedupCount} 条` : '';
       const stat = data.mode === 'online'
-        ? `已生成 ${data.count} 条号码，已自动下载（在线校验 ${data.validated} 条，通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}）`
-        : `已生成 ${data.count} 条号码，已自动下载`;
+        ? `已生成 ${finalResults.length} 条号码，已自动下载（在线校验 ${data.validated} 条，通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}${dedupNote}）`
+        : `已生成 ${finalResults.length} 条号码，已自动下载${dedupNote}`;
       document.getElementById('resultStat').textContent = stat;
       document.getElementById('resultArea').innerHTML = `<div class="empty-state"><div class="icon">✅</div><div>${stat}</div></div>`;
       renderBatchBar(data);
-      if (data.requested && data.count < data.requested) {
-        showToast(`仅生成 ${data.count}/${data.requested} 条，可能是防重后可用号码不足`);
+      if (data.requested && finalResults.length < data.requested) {
+        showToast(`仅生成 ${finalResults.length}/${data.requested} 条，可能是防重后可用号码不足`);
       }
     } catch (e) {
       showToast('请求失败: ' + e.message);
@@ -821,8 +876,28 @@
         return;
       }
 
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      const rawBlob = await res.blob();
+      let finalBlob = rawBlob;
+
+      if (commercial_unique) {
+        // Parse CSV, filter against local history, re-encode
+        const text = await rawBlob.text();
+        const lines = text.split('\n');
+        const header = lines[0];
+        const localHistory = getLocalHistory();
+        const newPhones = [];
+        const filteredLines = lines.slice(1).filter(line => {
+          if (!line.trim()) return false;
+          const phone = line.split(',')[0].replace(/^\uFEFF/, '');
+          if (localHistory.has(phone)) return false;
+          newPhones.push(phone);
+          return true;
+        });
+        addToLocalHistory(newPhones);
+        finalBlob = new Blob([header + '\n' + filteredLines.join('\n')], { type: 'text/csv;charset=utf-8' });
+      }
+
+      const url = URL.createObjectURL(finalBlob);
       const a = document.createElement('a');
       a.href = url;
       a.download = `bulk_generated_${Date.now()}.csv`;
