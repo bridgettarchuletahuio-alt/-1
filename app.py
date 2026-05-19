@@ -350,7 +350,7 @@ def api_generate():
 
             seen.add(phone)
             results.append({
-                "phone":    phone,
+                "phone":    "86" + phone,
                 "province": seg_info["province"],
                 "city":     seg_info["city"],
                 "operator": seg_info["operator"],
@@ -395,7 +395,7 @@ def api_generate():
                 [
                     (
                         batch_id,
-                        row["phone"],
+                        row["phone"][2:],  # strip "86" prefix for internal storage
                         row["province"],
                         row["city"],
                         row["operator"],
@@ -417,15 +417,16 @@ def api_generate():
 
     if mode == "online" and validate_limit > 0:
         for row in results[:validate_limit]:
+            raw_phone = row["phone"][2:]  # strip "86" prefix for API calls
             if current_provider == "abstract":
-                validated_result = validate_phone_with_abstract(row["phone"])
+                validated_result = validate_phone_with_abstract(raw_phone)
                 if validated_result.get("note") == "api_error" and "numverify" in available_providers:
-                    validated_result = validate_phone_with_numverify(row["phone"])
+                    validated_result = validate_phone_with_numverify(raw_phone)
                     fallback_used = True
             elif current_provider == "numverify":
-                validated_result = validate_phone_with_numverify(row["phone"])
+                validated_result = validate_phone_with_numverify(raw_phone)
                 if validated_result.get("note") == "api_error" and "abstract" in available_providers:
-                    validated_result = validate_phone_with_abstract(row["phone"])
+                    validated_result = validate_phone_with_abstract(raw_phone)
                     fallback_used = True
             else:
                 validated_result = {
@@ -555,7 +556,7 @@ def api_generate_bulk_export():
                     seen_batch.add(phone)
                     global_seen.add(phone)
                     row = {
-                        "phone": phone,
+                        "phone": "86" + phone,
                         "province": seg_info["province"],
                         "city": seg_info["city"],
                         "operator": seg_info["operator"],
@@ -600,7 +601,7 @@ def api_generate_bulk_export():
                         [
                             (
                                 batch_id,
-                                row["phone"],
+                                row["phone"][2:],  # strip "86" prefix for internal storage
                                 row["province"],
                                 row["city"],
                                 row["operator"],
@@ -725,7 +726,7 @@ def api_batch_export(batch_id: str):
     # 返回 CSV
     csv_lines = ["phone,province,city,operator"]
     csv_lines.extend(
-        f"{n['phone']},{n['province']},{n['city']},{n['operator']}" for n in numbers
+        f"86{n['phone']},{n['province']},{n['city']},{n['operator']}" for n in numbers
     )
     csv_content = "\n".join(csv_lines)
 
