@@ -473,6 +473,14 @@
       </div>
     </div>
 
+    <!-- 市区选择 -->
+    <div class="card" id="cityCard" style="display:none;">
+      <div class="card-title">选择市区（不选=全部）<span id="city-count" style="font-weight:400;color:var(--primary)"></span></div>
+      <div class="op-group" id="cityGroup">
+        <!-- populated by JS when province is selected -->
+      </div>
+    </div>
+
     <!-- 运营商 -->
     <div class="card">
       <div class="card-title">运营商（不选=全部）</div>
@@ -591,6 +599,7 @@
   let apiEnabled = false;
   let availableProviders = [];
   let segmentCounts = {};   // { province: segmentCount } — populated from /api/config
+  let citiesByProvince = {}; // { province: [city, ...] } — populated from /api/config
 
   // ---------- 本地历史（per-user localStorage 去重）----------
   const LOCAL_HISTORY_KEY = 'phone_gen_local_history';
@@ -738,6 +747,7 @@
       apiEnabled = cfg.api_enabled;
       availableProviders = cfg.available_providers || [];
       segmentCounts = cfg.segment_counts || {};
+      citiesByProvince = cfg.cities_by_province || {};
 
       // Populate province grid
       const grid = document.getElementById('provGrid');
@@ -786,18 +796,72 @@
   function toggleProv(btn) {
     btn.classList.toggle('active');
     updateProvCount();
+    updateCityPanel();
   }
   function selectAll() {
     document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.add('active'));
     updateProvCount();
+    updateCityPanel();
   }
   function clearAll() {
     document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.remove('active'));
     updateProvCount();
+    updateCityPanel();
   }
   function updateProvCount() {
     const n = document.querySelectorAll('#provGrid .prov-btn.active').length;
     document.getElementById('prov-count').textContent = n ? `(已选 ${n})` : '';
+  }
+
+  // ---------- 市区 ----------
+  function updateCityPanel() {
+    const selectedProvs = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
+    const cityCard = document.getElementById('cityCard');
+    const cityGroup = document.getElementById('cityGroup');
+
+    if (selectedProvs.length === 0) {
+      cityCard.style.display = 'none';
+      cityGroup.innerHTML = '';
+      updateCityCount();
+      return;
+    }
+
+    // Collect all cities for selected provinces (preserve previously selected cities)
+    const prevSelected = new Set(
+      [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city)
+    );
+
+    // Build union of cities across all selected provinces, sorted
+    const citySet = new Set();
+    selectedProvs.forEach(prov => {
+      (citiesByProvince[prov] || []).forEach(c => citySet.add(c));
+    });
+    const allCities = [...citySet].sort((a, b) => a.localeCompare(b, 'zh'));
+
+    if (allCities.length === 0) {
+      cityCard.style.display = 'none';
+      cityGroup.innerHTML = '';
+      updateCityCount();
+      return;
+    }
+
+    cityGroup.innerHTML = allCities.map(c => {
+      const active = prevSelected.has(c) ? ' active' : '';
+      return `<span class="op-tag${active}" data-city="${c}" onclick="toggleCity(this)">${c}</span>`;
+    }).join('');
+
+    cityCard.style.display = '';
+    updateCityCount();
+  }
+
+  function toggleCity(tag) {
+    tag.classList.toggle('active');
+    updateCityCount();
+  }
+
+  function updateCityCount() {
+    const n = document.querySelectorAll('#cityGroup .op-tag.active').length;
+    document.getElementById('city-count').textContent = n ? `(已选 ${n})` : '';
   }
   document.getElementById('provSearch').addEventListener('input', function () {
     const q = this.value.trim();
@@ -836,6 +900,7 @@
   async function generate() {
     const provinces = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
     const operators = [...document.querySelectorAll('#opGroup .op-tag.active')].map(t => t.dataset.op);
+    const cities = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
     const count = parseInt(document.getElementById('countInput').value) || 10;
     const suffix_digits = parseInt(document.getElementById('suffixSelect').value);
     const unique = document.getElementById('uniqueToggle').checked;
@@ -865,6 +930,7 @@
         body: JSON.stringify({
           provinces,
           operators,
+          cities,
           count,
           suffix_digits,
           unique,
@@ -897,9 +963,14 @@
       document.getElementById('resultStat').textContent = stat;
       document.getElementById('resultArea').innerHTML = `<div class="empty-state"><div class="icon">✅</div><div>${stat}</div></div>`;
       renderBatchBar(data);
-      // Update per-province generation tracking
-      if (provinces.length > 0 && finalResults.length > 0) {
-        addToProvHistory(provinces, finalResults.length);
+      // Update per-province / per-city generation tracking
+      if (finalResults.length > 0) {
+        if (cities.length > 0) {
+          // Track by city when cities are explicitly selected
+          addToProvHistory(cities, finalResults.length);
+        } else if (provinces.length > 0) {
+          addToProvHistory(provinces, finalResults.length);
+        }
       }
       if (data.requested && finalResults.length < data.requested) {
         showToast(`仅生成 ${finalResults.length}/${data.requested} 条，可能是防重后可用号码不足`);
@@ -915,6 +986,7 @@
   async function bulkExport() {
     const provinces = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
     const operators = [...document.querySelectorAll('#opGroup .op-tag.active')].map(t => t.dataset.op);
+    const cities = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
     const total_count = parseInt(document.getElementById('countInput').value) || 100000;
     const suffix_digits = parseInt(document.getElementById('suffixSelect').value);
     const unique = document.getElementById('uniqueToggle').checked;
@@ -941,6 +1013,7 @@
         body: JSON.stringify({
           provinces,
           operators,
+          cities,
           total_count,
           batch_size: 100000,
           suffix_digits,
@@ -984,9 +1057,13 @@
       a.click();
       URL.revokeObjectURL(url);
 
-      // Update per-province generation tracking
-      if (provinces.length > 0 && total_count > 0) {
-        addToProvHistory(provinces, total_count);
+      // Update per-province / per-city generation tracking
+      if (total_count > 0) {
+        if (cities.length > 0) {
+          addToProvHistory(cities, total_count);
+        } else if (provinces.length > 0) {
+          addToProvHistory(provinces, total_count);
+        }
       }
       showToast('分批导出完成，CSV 已下载');
     } catch (e) {
