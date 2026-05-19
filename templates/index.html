@@ -162,9 +162,9 @@
       cursor: pointer;
       text-align: center;
       transition: all .15s;
-      white-space: nowrap;
+      white-space: normal;
       overflow: hidden;
-      text-overflow: ellipsis;
+      line-height: 1.3;
     }
     .prov-btn:hover { border-color: var(--primary); color: var(--primary); }
     .prov-btn.active {
@@ -172,6 +172,16 @@
       color: #fff;
       border-color: var(--primary);
     }
+    .prov-btn .prov-name { display: block; font-weight: 500; }
+    .prov-btn .prov-stat {
+      display: block;
+      font-size: .68rem;
+      opacity: .75;
+      margin-top: 2px;
+      letter-spacing: 0;
+    }
+    .prov-btn.active .prov-stat { opacity: .9; }
+
 
     .prov-actions {
       display: flex;
@@ -459,6 +469,7 @@
       <div class="prov-actions">
         <button onclick="selectAll()">全选</button>
         <button onclick="clearAll()">清空</button>
+        <button onclick="clearProvHistory()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除各省份已生成计数">清除省份历史</button>
       </div>
     </div>
 
@@ -579,6 +590,7 @@
   let currentBatchId = '';
   let apiEnabled = false;
   let availableProviders = [];
+  let segmentCounts = {};   // { province: segmentCount } — populated from /api/config
 
   // ---------- 本地历史（per-user localStorage 去重）----------
   const LOCAL_HISTORY_KEY = 'phone_gen_local_history';
@@ -615,6 +627,64 @@
     localStorage.removeItem(LOCAL_HISTORY_KEY);
     updateLocalHistoryCount();
     showToast('本地历史已清除');
+  }
+
+  // ---------- 省份生成计数（localStorage）----------
+  const PROV_HISTORY_KEY = 'phone_gen_by_province';
+
+  function getProvHistory() {
+    try {
+      return JSON.parse(localStorage.getItem(PROV_HISTORY_KEY) || '{}');
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function addToProvHistory(provinces, totalGenerated) {
+    if (!provinces || provinces.length === 0) return;
+    const history = getProvHistory();
+    // Distribute the generated count evenly across selected provinces
+    const perProv = Math.round(totalGenerated / provinces.length);
+    const remainder = totalGenerated - perProv * provinces.length;
+    provinces.forEach((p, i) => {
+      history[p] = (history[p] || 0) + perProv + (i === 0 ? remainder : 0);
+    });
+    try {
+      localStorage.setItem(PROV_HISTORY_KEY, JSON.stringify(history));
+    } catch (e) {}
+    updateProvStats();
+  }
+
+  function clearProvHistory() {
+    localStorage.removeItem(PROV_HISTORY_KEY);
+    updateProvStats();
+    showToast('省份历史已清除');
+  }
+
+  function getProvTotal(prov, suffixDigits) {
+    const segs = segmentCounts[prov] || 0;
+    return segs * Math.pow(10, suffixDigits);
+  }
+
+  function updateProvStats() {
+    const suffixDigits = parseInt(document.getElementById('suffixSelect').value);
+    const history = getProvHistory();
+    document.querySelectorAll('#provGrid .prov-btn').forEach(btn => {
+      const prov = btn.dataset.prov;
+      const generated = history[prov] || 0;
+      const total = getProvTotal(prov, suffixDigits);
+      const remaining = Math.max(0, total - generated);
+      const statEl = btn.querySelector('.prov-stat');
+      if (statEl) {
+        statEl.textContent = `${fmtNum(generated)}/${fmtNum(total)}`;
+        statEl.title = `已生成: ${fmtNum(generated)}  剩余: ${fmtNum(remaining)}  总计: ${fmtNum(total)}`;
+      }
+    });
+  }
+
+  function fmtNum(n) {
+    if (n >= 10000) return (n / 10000).toFixed(1).replace(/\.0$/, '') + '万';
+    return n.toString();
   }
 
   // ---------- 登录 ----------
@@ -667,11 +737,12 @@
       const cfg = await res.json();
       apiEnabled = cfg.api_enabled;
       availableProviders = cfg.available_providers || [];
+      segmentCounts = cfg.segment_counts || {};
 
       // Populate province grid
       const grid = document.getElementById('provGrid');
       grid.innerHTML = cfg.provinces.map(p =>
-        `<button class="prov-btn" data-prov="${p}" onclick="toggleProv(this)">${p}</button>`
+        `<button class="prov-btn" data-prov="${p}" onclick="toggleProv(this)"><span class="prov-name">${p}</span><span class="prov-stat"></span></button>`
       ).join('');
 
       // Populate operator tags
@@ -687,6 +758,7 @@
 
       toggleOnlineConfig();
       updateLocalHistoryCount();
+      updateProvStats();
     } catch (e) {
       showToast('初始化失败: ' + e.message);
     }
@@ -732,6 +804,10 @@
     document.querySelectorAll('#provGrid .prov-btn').forEach(b => {
       b.style.display = (!q || b.dataset.prov.includes(q)) ? '' : 'none';
     });
+  });
+
+  document.getElementById('suffixSelect').addEventListener('change', function () {
+    updateProvStats();
   });
 
   // ---------- 运营商 ----------
@@ -821,6 +897,10 @@
       document.getElementById('resultStat').textContent = stat;
       document.getElementById('resultArea').innerHTML = `<div class="empty-state"><div class="icon">✅</div><div>${stat}</div></div>`;
       renderBatchBar(data);
+      // Update per-province generation tracking
+      if (provinces.length > 0 && finalResults.length > 0) {
+        addToProvHistory(provinces, finalResults.length);
+      }
       if (data.requested && finalResults.length < data.requested) {
         showToast(`仅生成 ${finalResults.length}/${data.requested} 条，可能是防重后可用号码不足`);
       }
@@ -904,6 +984,10 @@
       a.click();
       URL.revokeObjectURL(url);
 
+      // Update per-province generation tracking
+      if (provinces.length > 0 && total_count > 0) {
+        addToProvHistory(provinces, total_count);
+      }
       showToast('分批导出完成，CSV 已下载');
     } catch (e) {
       showToast('分批导出失败: ' + e.message);

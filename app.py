@@ -189,6 +189,7 @@ def api_config():
         "operators": sorted(all_operators),
         "api_enabled": bool(available_providers),
         "available_providers": available_providers,
+        "segment_counts": {prov: len(segs) for prov, segs in segments_by_province.items()},
     })
 
 
