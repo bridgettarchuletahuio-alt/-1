@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>号码段生成工具</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #f0f2f5;
+      --card: #ffffff;
+      --primary: #4f6ef7;
+      --primary-hover: #3a57e8;
+      --danger: #ff4d4f;
+      --text: #1a1a2e;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --radius: 10px;
+      --shadow: 0 2px 12px rgba(0,0,0,.08);
+    }
+
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 24px 16px;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 24px;
+      letter-spacing: .5px;
+    }
+    h1 span { color: var(--primary); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+
+    @media (max-width: 768px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    /* ---- 卡片 ---- */
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+
+    .card-title {
+      font-size: .9rem;
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 8px;
+    }
+
+    /* ---- 省份网格 ---- */
+    .province-search {
+      width: 100%;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: .88rem;
+      margin-bottom: 10px;
+      outline: none;
+    }
+    .province-search:focus { border-color: var(--primary); }
+
+    .province-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 5px;
+      max-height: 340px;
+      overflow-y: auto;
+      padding-right: 4px;
+    }
+
+    .prov-btn {
+      padding: 5px 4px;
+      font-size: .8rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fafafa;
+      cursor: pointer;
+      text-align: center;
+      transition: all .15s;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .prov-btn:hover { border-color: var(--primary); color: var(--primary); }
+    .prov-btn.active {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+
+    .prov-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .prov-actions button {
+      flex: 1;
+      padding: 6px;
+      font-size: .8rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fafafa;
+      cursor: pointer;
+    }
+    .prov-actions button:hover { border-color: var(--primary); color: var(--primary); }
+
+    /* ---- 运营商 ---- */
+    .op-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .op-tag {
+      padding: 5px 12px;
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      font-size: .84rem;
+      cursor: pointer;
+      transition: all .15s;
+    }
+    .op-tag:hover { border-color: var(--primary); color: var(--primary); }
+    .op-tag.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+
+    /* ---- 参数区 ---- */
+    .param-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .param-row label {
+      font-size: .88rem;
+      width: 80px;
+      flex-shrink: 0;
+      color: var(--muted);
+    }
+    .param-row input[type=number],
+    .param-row select {
+      flex: 1;
+      padding: 7px 10px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: .88rem;
+      outline: none;
+    }
+    .param-row input:focus,
+    .param-row select:focus { border-color: var(--primary); }
+
+    .hint {
+      font-size: .78rem;
+      color: var(--muted);
+      margin-top: -6px;
+      margin-bottom: 12px;
+      line-height: 1.5;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+    .toggle-row label { font-size: .88rem; color: var(--muted); }
+
+    /* toggle switch */
+    .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider {
+      position: absolute; cursor: pointer;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: #ccc; border-radius: 22px; transition: .3s;
+    }
+    .slider:before {
+      position: absolute; content: "";
+      height: 16px; width: 16px;
+      left: 3px; bottom: 3px;
+      background: white; border-radius: 50%; transition: .3s;
+    }
+    input:checked + .slider { background: var(--primary); }
+    input:checked + .slider:before { transform: translateX(18px); }
+
+    /* ---- 生成按钮 ---- */
+    .btn-generate {
+      width: 100%;
+      padding: 11px;
+      background: var(--primary);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .btn-generate:hover { background: var(--primary-hover); }
+    .btn-generate:disabled { background: #a0aec0; cursor: not-allowed; }
+
+    /* ---- 结果区 ---- */
+    .result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .result-stat { font-size: .88rem; color: var(--muted); }
+
+    .result-actions { display: flex; gap: 8px; }
+    .btn-sm {
+      padding: 5px 12px;
+      font-size: .82rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #fafafa;
+      cursor: pointer;
+    }
+    .btn-sm:hover { border-color: var(--primary); color: var(--primary); }
+    .btn-sm.danger:hover { border-color: var(--danger); color: var(--danger); }
+
+    .batch-bar {
+      margin: 10px 0 12px;
+      padding: 8px 10px;
+      background: #f8fafc;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: .82rem;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .batch-list {
+      margin-top: 10px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      max-height: 180px;
+      overflow-y: auto;
+      background: #fff;
+      display: none;
+    }
+
+    .batch-item {
+      padding: 8px 10px;
+      border-bottom: 1px solid #f0f0f0;
+      font-size: .82rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .batch-item:last-child { border-bottom: none; }
+
+    /* ---- 表格 ---- */
+    .table-wrap {
+      overflow-x: auto;
+      max-height: 520px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: .87rem;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      background: #f8fafc;
+      padding: 9px 12px;
+      text-align: left;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody tr:nth-child(even) { background: #fafbfc; }
+    tbody tr:hover { background: #eef2ff; }
+    tbody td {
+      padding: 8px 12px;
+      border-bottom: 1px solid #f0f0f0;
+    }
+    .phone-num { font-family: monospace; font-size: .95rem; font-weight: 600; letter-spacing: .5px; }
+
+    /* ---- 徽章 ---- */
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: .78rem;
+      font-weight: 500;
+    }
+    .badge-移动 { background: #e6f4ea; color: #1a7a3a; }
+    .badge-联通 { background: #e8f0fe; color: #1a56c4; }
+    .badge-电信 { background: #fef3e2; color: #b45309; }
+    .badge-虚拟 { background: #fce7f3; color: #9d174d; }
+    .badge-广电 { background: #ede9fe; color: #5b21b6; }
+    .badge-other { background: #f3f4f6; color: #374151; }
+
+    /* ---- 空状态 ---- */
+    .empty-state {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+    }
+    .empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+
+    /* ---- 加载 ---- */
+    .spinner {
+      display: inline-block;
+      width: 18px; height: 18px;
+      border: 2px solid #fff;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin .6s linear infinite;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---- Toast ---- */
+    #toast {
+      position: fixed;
+      bottom: 30px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: #1a1a2e;
+      color: #fff;
+      padding: 10px 22px;
+      border-radius: 24px;
+      font-size: .88rem;
+      opacity: 0;
+      transition: all .3s;
+      pointer-events: none;
+      z-index: 999;
+    }
+    #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  </style>
+</head>
+<body>
+
+<h1>📱 <span>号码段</span>生成工具</h1>
+
+<div class="layout">
+
+  <!-- ===== 左侧控制面板 ===== -->
+  <div style="display:flex;flex-direction:column;gap:16px;">
+
+    <!-- 省份选择 -->
+    <div class="card">
+      <div class="card-title">选择省份 <span id="prov-count" style="font-weight:400;color:var(--primary)"></span></div>
+      <input class="province-search" type="text" id="provSearch" placeholder="搜索省份…" />
+      <div class="province-grid" id="provGrid">
+        {% for p in provinces %}
+        <button class="prov-btn" data-prov="{{ p }}" onclick="toggleProv(this)">{{ p }}</button>
+        {% endfor %}
+      </div>
+      <div class="prov-actions">
+        <button onclick="selectAll()">全选</button>
+        <button onclick="clearAll()">清空</button>
+      </div>
+    </div>
+
+    <!-- 运营商 -->
+    <div class="card">
+      <div class="card-title">运营商（不选=全部）</div>
+      <div class="op-group" id="opGroup">
+        {% for op in operators %}
+        <span class="op-tag" data-op="{{ op }}" onclick="toggleOp(this)">{{ op }}</span>
+        {% endfor %}
+      </div>
+    </div>
+
+    <!-- 参数 -->
+    <div class="card">
+      <div class="card-title">生成参数</div>
+      <div class="param-row">
+        <label>生成数量</label>
+        <input type="number" id="countInput" value="20" min="1" max="5000000" />
+      </div>
+      <div class="hint">普通生成单次最多 100000 条；若超过 100000，点击「一键分批导出CSV」。</div>
+      <div class="param-row">
+        <label>生成模式</label>
+        <select id="modeSelect" onchange="toggleOnlineConfig()">
+          <option value="offline" selected>离线生成（本地）</option>
+          <option value="online">在线校验（AbstractAPI）</option>
+        </select>
+      </div>
+      <div class="param-row" id="validateLimitRow" style="display:none;">
+        <label>校验条数</label>
+        <input type="number" id="validateLimitInput" value="100" min="0" />
+      </div>
+      <div class="param-row" id="providerRow" style="display:none;">
+        <label>在线通道</label>
+        <select id="providerSelect">
+          <option value="auto" selected>自动兜底</option>
+          <option value="abstract">AbstractAPI</option>
+          <option value="numverify">Numverify</option>
+        </select>
+      </div>
+      <div class="hint" id="onlineHint" style="display:none;">
+        在线模式会对前 N 条发起 API 校验。服务器当前
+        {% if api_enabled %}已配置{% else %}未配置{% endif %}
+        API Key，可用通道：{% if available_providers|length > 0 %}{{ available_providers | join(', ') }}{% else %}无{% endif %}。
+      </div>
+      <div class="param-row">
+        <label>后缀位数</label>
+        <select id="suffixSelect">
+          <option value="4" selected>4 位（完整11位手机号）</option>
+          <option value="3">3 位（10位）</option>
+          <option value="2">2 位（9位）</option>
+          <option value="0">0 位（仅7位号段）</option>
+        </select>
+      </div>
+      <div class="toggle-row">
+        <label class="switch">
+          <input type="checkbox" id="uniqueToggle" checked />
+          <span class="slider"></span>
+        </label>
+        <label>号码去重</label>
+      </div>
+      <div class="toggle-row">
+        <label class="switch">
+          <input type="checkbox" id="commercialUniqueToggle" checked />
+          <span class="slider"></span>
+        </label>
+        <label>商用防重（全局历史）</label>
+      </div>
+      <button class="btn-generate" id="genBtn" onclick="generate()">生成号码</button>
+      <button class="btn-generate" id="bulkBtn" style="margin-top:10px;background:#0f766e;" onclick="bulkExport()">一键分批导出CSV</button>
+    </div>
+
+  </div>
+
+  <!-- ===== 右侧结果 ===== -->
+  <div class="card" style="padding:20px;">
+    <div class="result-header">
+      <div class="card-title" style="margin-bottom:0;border:none;padding:0;">生成结果</div>
+      <div style="display:flex;align-items:center;gap:12px;">
+        <span class="result-stat" id="resultStat">—</span>
+        <div class="result-actions">
+          <button class="btn-sm" onclick="loadRecentBatches()">🧾 最近批次</button>
+          <button class="btn-sm" onclick="copyPhones()">📋 复制号码</button>
+          <button class="btn-sm" onclick="downloadCSV()">⬇ 下载 CSV</button>
+          <button class="btn-sm danger" onclick="clearResult()">🗑 清空</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="batch-bar" id="batchBar" style="display:none;">
+      <span id="batchText"></span>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-sm" onclick="copyBatchId()">复制批次号</button>
+        <button class="btn-sm" onclick="downloadBatchCSV()">⬇ 批次CSV</button>
+        <button class="btn-sm danger" onclick="voidCurrentBatch()">作废批次</button>
+      </div>
+    </div>
+
+    <div class="batch-list" id="batchList"></div>
+
+    <div id="resultArea">
+      <div class="empty-state">
+        <div class="icon">📋</div>
+        <div>选择省份后点击「生成号码」</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="toast"></div>
+
+<script>
+  let resultData = [];
+  let currentBatchId = '';
+  const apiEnabled = {{ 'true' if api_enabled else 'false' }};
+  const availableProviders = {{ available_providers | tojson }};
+
+  // ---------- 省份 ----------
+  function toggleProv(btn) {
+    btn.classList.toggle('active');
+    updateProvCount();
+  }
+  function selectAll() {
+    document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.add('active'));
+    updateProvCount();
+  }
+  function clearAll() {
+    document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.remove('active'));
+    updateProvCount();
+  }
+  function updateProvCount() {
+    const n = document.querySelectorAll('#provGrid .prov-btn.active').length;
+    document.getElementById('prov-count').textContent = n ? `(已选 ${n})` : '';
+  }
+  document.getElementById('provSearch').addEventListener('input', function () {
+    const q = this.value.trim();
+    document.querySelectorAll('#provGrid .prov-btn').forEach(b => {
+      b.style.display = (!q || b.dataset.prov.includes(q)) ? '' : 'none';
+    });
+  });
+
+  // ---------- 运营商 ----------
+  function toggleOp(tag) { tag.classList.toggle('active'); }
+
+  function toggleOnlineConfig() {
+    const online = document.getElementById('modeSelect').value === 'online';
+    document.getElementById('validateLimitRow').style.display = online ? '' : 'none';
+    document.getElementById('providerRow').style.display = online ? '' : 'none';
+    document.getElementById('onlineHint').style.display = online ? '' : 'none';
+
+    const providerSelect = document.getElementById('providerSelect');
+    [...providerSelect.options].forEach(opt => {
+      if (opt.value === 'auto') {
+        opt.disabled = false;
+        return;
+      }
+      opt.disabled = !availableProviders.includes(opt.value);
+    });
+    if (providerSelect.value !== 'auto' && !availableProviders.includes(providerSelect.value)) {
+      providerSelect.value = 'auto';
+    }
+  }
+
+  // ---------- 生成 ----------
+  async function generate() {
+    const provinces = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
+    const operators = [...document.querySelectorAll('#opGroup .op-tag.active')].map(t => t.dataset.op);
+    const count = parseInt(document.getElementById('countInput').value) || 10;
+    const suffix_digits = parseInt(document.getElementById('suffixSelect').value);
+    const unique = document.getElementById('uniqueToggle').checked;
+    const commercial_unique = document.getElementById('commercialUniqueToggle').checked;
+    const mode = document.getElementById('modeSelect').value;
+    const validate_limit = parseInt(document.getElementById('validateLimitInput').value || '100');
+    const provider = document.getElementById('providerSelect').value;
+
+    if (count > 100000) {
+      showToast('单次最多生成 100000 条，请分批生成');
+      return;
+    }
+
+    if (mode === 'online' && !apiEnabled) {
+      showToast('服务器未配置 ABSTRACT_API_KEY，无法在线校验');
+      return;
+    }
+
+    const btn = document.getElementById('genBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>生成中…';
+
+    try {
+      const res = await fetch('/api/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provinces,
+          operators,
+          count,
+          suffix_digits,
+          unique,
+          commercial_unique,
+          mode,
+          validate_limit,
+          provider,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.error || '生成失败'); return; }
+      resultData = data.results;
+      currentBatchId = data.batch_id || '';
+      renderTable(resultData);
+      const stat = data.mode === 'online'
+        ? `共 ${data.count} 条，已在线校验 ${data.validated} 条（通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}）`
+        : `共 ${data.count} 条（离线模式）`;
+      document.getElementById('resultStat').textContent = stat;
+      renderBatchBar(data);
+      if (data.requested && data.count < data.requested) {
+        showToast(`仅生成 ${data.count}/${data.requested} 条，可能是防重后可用号码不足`);
+      }
+    } catch (e) {
+      showToast('请求失败: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '生成号码';
+    }
+  }
+
+  async function bulkExport() {
+    const provinces = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
+    const operators = [...document.querySelectorAll('#opGroup .op-tag.active')].map(t => t.dataset.op);
+    const total_count = parseInt(document.getElementById('countInput').value) || 100000;
+    const suffix_digits = parseInt(document.getElementById('suffixSelect').value);
+    const unique = document.getElementById('uniqueToggle').checked;
+    const commercial_unique = document.getElementById('commercialUniqueToggle').checked;
+    const mode = document.getElementById('modeSelect').value;
+
+    if (mode !== 'offline') {
+      showToast('分批导出仅支持离线模式');
+      return;
+    }
+    if (total_count > 5000000) {
+      showToast('分批导出最多 5000000 条');
+      return;
+    }
+
+    const btn = document.getElementById('bulkBtn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>分批生成中…';
+
+    try {
+      const res = await fetch('/api/generate/bulk-export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provinces,
+          operators,
+          total_count,
+          batch_size: 100000,
+          suffix_digits,
+          unique,
+          commercial_unique,
+          mode,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        showToast(data.error || '分批导出失败');
+        return;
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bulk_generated_${Date.now()}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+
+      showToast('分批导出完成，CSV 已下载');
+    } catch (e) {
+      showToast('分批导出失败: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '一键分批导出CSV';
+    }
+  }
+
+  function renderBatchBar(data) {
+    const bar = document.getElementById('batchBar');
+    const txt = document.getElementById('batchText');
+    if (!data.batch_id) {
+      bar.style.display = 'none';
+      return;
+    }
+    bar.style.display = 'flex';
+    txt.textContent = `批次号: ${data.batch_id} | 请求 ${data.requested} | 生成 ${data.count} | 商用防重: ${data.commercial_unique ? '开' : '关'}`;
+  }
+
+  async function loadRecentBatches() {
+    try {
+      const res = await fetch('/api/batches?limit=20');
+      const data = await res.json();
+      const box = document.getElementById('batchList');
+      if (!Array.isArray(data) || data.length === 0) {
+        box.innerHTML = '<div class="batch-item">暂无批次记录</div>';
+        box.style.display = 'block';
+        return;
+      }
+      box.innerHTML = data.map(b => `
+        <div class="batch-item">
+          <span>${b.batch_id} | ${b.generated_count}/${b.requested_count} | ${b.status}</span>
+          <button class="btn-sm" onclick="loadBatchDetail('${b.batch_id}')">加载</button>
+        </div>
+      `).join('');
+      box.style.display = 'block';
+    } catch (e) {
+      showToast('读取批次失败: ' + e.message);
+    }
+  }
+
+  async function loadBatchDetail(batchId) {
+    try {
+      const res = await fetch(`/api/batches/${batchId}`);
+      const data = await res.json();
+      if (!res.ok) { showToast(data.error || '加载批次失败'); return; }
+      currentBatchId = data.batch_id;
+      resultData = data.numbers.map(n => ({
+        phone: n.phone,
+        province: n.province,
+        city: n.city,
+        operator: n.operator,
+      }));
+      renderTable(resultData);
+      document.getElementById('resultStat').textContent = `批次 ${data.batch_id} | ${data.generated_count}/${data.requested_count} | ${data.status}`;
+      renderBatchBar({
+        batch_id: data.batch_id,
+        requested: data.requested_count,
+        count: data.generated_count,
+        commercial_unique: !!data.commercial_unique,
+      });
+      showToast('批次已加载');
+    } catch (e) {
+      showToast('加载失败: ' + e.message);
+    }
+  }
+
+  function copyBatchId() {
+    if (!currentBatchId) { showToast('当前无批次号'); return; }
+    navigator.clipboard.writeText(currentBatchId).then(() => showToast('已复制批次号'));
+  }
+
+  async function voidCurrentBatch() {
+    if (!currentBatchId) { showToast('当前无批次可作废'); return; }
+    try {
+      const res = await fetch(`/api/batches/${currentBatchId}/void`, { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) { showToast(data.error || '作废失败'); return; }
+      showToast(`批次 ${currentBatchId} 已作废`);
+      loadRecentBatches();
+    } catch (e) {
+      showToast('作废失败: ' + e.message);
+    }
+  }
+
+  function downloadBatchCSV() {
+    if (!currentBatchId) { showToast('当前无批次可下载'); return; }
+    const url = `/api/batches/${currentBatchId}/export`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `batch_${currentBatchId}.csv`;
+    a.click();
+    showToast('批次 CSV 已下载');
+  }
+
+  function badgeClass(op) {
+    if (op.includes('移动')) return 'badge-移动';
+    if (op.includes('联通')) return 'badge-联通';
+    if (op.includes('电信')) return 'badge-电信';
+    if (op.includes('虚拟')) return 'badge-虚拟';
+    if (op.includes('广电')) return 'badge-广电';
+    return 'badge-other';
+  }
+
+  function renderTable(rows) {
+    if (!rows.length) {
+      document.getElementById('resultArea').innerHTML = '<div class="empty-state"><div class="icon">🔍</div><div>无结果，请调整条件</div></div>';
+      return;
+    }
+    let html = `<div class="table-wrap"><table>
+      <thead><tr>
+        <th>#</th><th>手机号码</th><th>省份</th><th>城市</th><th>运营商</th><th>校验</th><th>国家</th><th>线路</th>
+      </tr></thead><tbody>`;
+    rows.forEach((r, i) => {
+      const validText = (r.valid === undefined) ? '-' : (r.valid ? '有效' : '无效/失败');
+      const countryText = r.country || '-';
+      const lineTypeText = r.line_type || '-';
+      html += `<tr>
+        <td style="color:var(--muted);font-size:.8rem">${i + 1}</td>
+        <td><span class="phone-num">${r.phone}</span></td>
+        <td>${r.province}</td>
+        <td>${r.city}</td>
+        <td><span class="badge ${badgeClass(r.operator)}">${r.operator}</span></td>
+        <td>${validText}</td>
+        <td>${countryText}</td>
+        <td>${lineTypeText}</td>
+      </tr>`;
+    });
+    html += '</tbody></table></div>';
+    document.getElementById('resultArea').innerHTML = html;
+  }
+
+  // ---------- 工具 ----------
+  function copyPhones() {
+    if (!resultData.length) { showToast('暂无数据'); return; }
+    const text = resultData.map(r => r.phone).join('\n');
+    navigator.clipboard.writeText(text).then(() => showToast(`已复制 ${resultData.length} 个号码`));
+  }
+
+  function downloadCSV() {
+    if (!resultData.length) { showToast('暂无数据'); return; }
+    const header = 'phone,province,city,operator,valid,country,line_type,carrier\n';
+    const rows = resultData.map(r => {
+      const valid = r.valid === undefined ? '' : (r.valid ? 'true' : 'false');
+      return `${r.phone},${r.province},${r.city},${r.operator},${valid},${r.country || ''},${r.line_type || ''},${r.carrier || ''}`;
+    }).join('\n');
+    const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'generated_phones.csv';
+    a.click(); URL.revokeObjectURL(url);
+    showToast('CSV 已下载');
+  }
+
+  function clearResult() {
+    resultData = [];
+    currentBatchId = '';
+    document.getElementById('resultStat').textContent = '—';
+    document.getElementById('batchBar').style.display = 'none';
+    document.getElementById('resultArea').innerHTML = `<div class="empty-state"><div class="icon">📋</div><div>选择省份后点击「生成号码」</div></div>`;
+  }
+
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  toggleOnlineConfig();
+</script>
+</body>
+</html>
