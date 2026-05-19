@@ -217,6 +217,21 @@
     .btn-generate:hover { background: var(--primary-hover); }
     .btn-generate:disabled { background: #a0aec0; cursor: not-allowed; }
 
+    /* ---- 本地历史栏 ---- */
+    .local-history-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding: 7px 10px;
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      font-size: .82rem;
+      color: #166534;
+    }
+
     /* ---- 结果区 ---- */
     .result-header {
       display: flex;
@@ -448,7 +463,11 @@
           <input type="checkbox" id="commercialUniqueToggle" checked />
           <span class="slider"></span>
         </label>
-        <label>商用防重（全局历史）</label>
+        <label>商业防重（本地历史）</label>
+      </div>
+      <div class="local-history-bar" id="localHistoryBar">
+        <span id="localHistoryCount">本地历史：0 条</span>
+        <button class="btn-sm danger" onclick="clearLocalHistory()">清除本地历史</button>
       </div>
       <button class="btn-generate" id="genBtn" onclick="generate()">生成号码</button>
       <button class="btn-generate" id="bulkBtn" style="margin-top:10px;background:#0f766e;" onclick="bulkExport()">一键分批导出CSV</button>
@@ -499,6 +518,43 @@
   let currentBatchId = '';
   const apiEnabled = {{ 'true' if api_enabled else 'false' }};
   const availableProviders = {{ available_providers | tojson }};
+
+  // ---------- 本地历史（商业防重） ----------
+  const LOCAL_HISTORY_KEY = 'phone_gen_local_history';
+
+  function getLocalHistory() {
+    try {
+      return new Set(JSON.parse(localStorage.getItem(LOCAL_HISTORY_KEY) || '[]'));
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  function saveLocalHistory(set) {
+    try {
+      localStorage.setItem(LOCAL_HISTORY_KEY, JSON.stringify([...set]));
+    } catch (e) {
+      // localStorage 可能已满，静默忽略
+    }
+  }
+
+  function addToLocalHistory(phones) {
+    const history = getLocalHistory();
+    phones.forEach(p => history.add(p));
+    saveLocalHistory(history);
+    updateLocalHistoryCount();
+  }
+
+  function updateLocalHistoryCount() {
+    const count = getLocalHistory().size;
+    document.getElementById('localHistoryCount').textContent = `本地历史：${count.toLocaleString()} 条`;
+  }
+
+  function clearLocalHistory() {
+    localStorage.removeItem(LOCAL_HISTORY_KEY);
+    updateLocalHistoryCount();
+    showToast('本地历史已清除');
+  }
 
   // ---------- 省份 ----------
   function toggleProv(btn) {
@@ -582,7 +638,6 @@
           count,
           suffix_digits,
           unique,
-          commercial_unique,
           mode,
           validate_limit,
           provider,
@@ -590,17 +645,33 @@
       });
       const data = await res.json();
       if (!res.ok) { showToast(data.error || '生成失败'); return; }
-      resultData = data.results;
+
+      // 商业防重：用本地历史过滤已生成过的号码
+      let filtered = data.results;
+      let dedupSkipped = 0;
+      if (commercial_unique) {
+        const localHistory = getLocalHistory();
+        filtered = data.results.filter(r => !localHistory.has(r.phone));
+        dedupSkipped = data.results.length - filtered.length;
+      }
+
+      // 将本次新号码存入本地历史
+      if (commercial_unique && filtered.length > 0) {
+        addToLocalHistory(filtered.map(r => r.phone));
+      }
+
+      resultData = filtered;
       currentBatchId = data.batch_id || '';
       downloadCSV();
+      const dedupNote = (commercial_unique && dedupSkipped > 0) ? `，本地防重跳过 ${dedupSkipped} 条` : '';
       const stat = data.mode === 'online'
-        ? `已生成 ${data.count} 条号码，已自动下载（在线校验 ${data.validated} 条，通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}）`
-        : `已生成 ${data.count} 条号码，已自动下载`;
+        ? `已生成 ${filtered.length} 条号码，已自动下载（在线校验 ${data.validated} 条，通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}${dedupNote}）`
+        : `已生成 ${filtered.length} 条号码，已自动下载${dedupNote}`;
       document.getElementById('resultStat').textContent = stat;
       document.getElementById('resultArea').innerHTML = `<div class="empty-state"><div class="icon">✅</div><div>${stat}</div></div>`;
       renderBatchBar(data);
-      if (data.requested && data.count < data.requested) {
-        showToast(`仅生成 ${data.count}/${data.requested} 条，可能是防重后可用号码不足`);
+      if (data.requested && filtered.length < data.requested) {
+        showToast(`仅生成 ${filtered.length}/${data.requested} 条${dedupNote || '，可能是号码不足'}`);
       }
     } catch (e) {
       showToast('请求失败: ' + e.message);
@@ -643,7 +714,6 @@
           batch_size: 100000,
           suffix_digits,
           unique,
-          commercial_unique,
           mode,
         }),
       });
@@ -654,7 +724,28 @@
         return;
       }
 
-      const blob = await res.blob();
+      const text = await res.text();
+
+      // 商业防重：解析 CSV，过滤本地历史中已有的号码，并将新号码存入本地历史
+      let csvContent = text;
+      if (commercial_unique) {
+        const lines = text.split('\n');
+        const header = lines[0];
+        const dataLines = lines.slice(1).filter(l => l.trim());
+        const localHistory = getLocalHistory();
+        const newLines = dataLines.filter(l => {
+          const phone = l.split(',')[0].replace(/^\uFEFF/, '').trim();
+          return phone && !localHistory.has(phone);
+        });
+        const newPhones = newLines.map(l => l.split(',')[0].replace(/^\uFEFF/, '').trim()).filter(Boolean);
+        if (newPhones.length > 0) addToLocalHistory(newPhones);
+        csvContent = [header, ...newLines].join('\n');
+        if (dataLines.length - newLines.length > 0) {
+          showToast(`本地防重跳过 ${dataLines.length - newLines.length} 条重复号码`);
+        }
+      }
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -828,6 +919,7 @@
   }
 
   toggleOnlineConfig();
+  updateLocalHistoryCount();
 </script>
 </body>
 </html>

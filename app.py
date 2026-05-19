@@ -311,66 +311,30 @@ def api_generate():
     results: list[dict] = []
     seen: set[str] = set()
     max_attempts = max(count * 50, 2000)
-    db_conn: sqlite3.Connection | None = None
-    db_cur: sqlite3.Cursor | None = None
     created_at = datetime.now(timezone.utc).isoformat()
     batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
 
-    if commercial_unique:
-        db_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
-        db_conn.execute("PRAGMA busy_timeout=30000")
-        db_cur = db_conn.cursor()
+    for _ in range(max_attempts):
+        if len(results) >= count:
+            break
+        seg_info = random.choice(candidates)
+        suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
+        phone = seg_info["segment"] + suffix
 
-    try:
-        for _ in range(max_attempts):
-            if len(results) >= count:
-                break
-            seg_info = random.choice(candidates)
-            suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
-            phone = seg_info["segment"] + suffix
+        if unique and phone in seen:
+            continue
 
-            if unique and phone in seen:
-                continue
-
-            if commercial_unique and db_cur is not None:
-                try:
-                    db_cur.execute(
-                        """
-                        INSERT INTO issued_numbers(phone, province, city, operator, created_at, batch_id)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            phone,
-                            seg_info["province"],
-                            seg_info["city"],
-                            seg_info["operator"],
-                            created_at,
-                            batch_id,
-                        ),
-                    )
-                except sqlite3.IntegrityError:
-                    # 历史上已生成过，直接跳过
-                    continue
-                except sqlite3.OperationalError as exc:
-                    if "database is locked" in str(exc).lower():
-                        return jsonify({"error": "数据库繁忙，请稍后重试"}), 503
-                    raise
-
-            seen.add(phone)
-            # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
-            phone_with_prefix = (
-                phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
-            )
-            results.append({
-                "phone":    phone_with_prefix,
-                "province": seg_info["province"],
-                "city":     seg_info["city"],
-                "operator": seg_info["operator"],
-            })
-    finally:
-        if db_conn is not None:
-            db_conn.commit()
-            db_conn.close()
+        seen.add(phone)
+        # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
+        phone_with_prefix = (
+            phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
+        )
+        results.append({
+            "phone":    phone_with_prefix,
+            "province": seg_info["province"],
+            "city":     seg_info["city"],
+            "operator": seg_info["operator"],
+        })
 
     # 批次记录：无论是否开启商用防重都写入，便于追溯与导出
     conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
@@ -527,63 +491,30 @@ def api_generate_bulk_export():
             created_at = datetime.now(timezone.utc).isoformat()
             batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
 
-            db_conn: sqlite3.Connection | None = None
-            db_cur: sqlite3.Cursor | None = None
-            if commercial_unique:
-                db_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
-                db_conn.execute("PRAGMA busy_timeout=30000")
-                db_cur = db_conn.cursor()
+            for _ in range(max_attempts):
+                if len(results) >= request_count:
+                    break
 
-            try:
-                for _ in range(max_attempts):
-                    if len(results) >= request_count:
-                        break
+                seg_info = random.choice(candidates)
+                suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
+                phone = seg_info["segment"] + suffix
 
-                    seg_info = random.choice(candidates)
-                    suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
-                    phone = seg_info["segment"] + suffix
+                if unique and (phone in seen_batch or phone in global_seen):
+                    continue
 
-                    if unique and (phone in seen_batch or phone in global_seen):
-                        continue
-
-                    if commercial_unique and db_cur is not None:
-                        try:
-                            db_cur.execute(
-                                """
-                                INSERT INTO issued_numbers(phone, province, city, operator, created_at, batch_id)
-                                VALUES (?, ?, ?, ?, ?, ?)
-                                """,
-                                (
-                                    phone,
-                                    seg_info["province"],
-                                    seg_info["city"],
-                                    seg_info["operator"],
-                                    created_at,
-                                    batch_id,
-                                ),
-                            )
-                        except sqlite3.IntegrityError:
-                            continue
-                        except sqlite3.OperationalError:
-                            continue
-
-                    seen_batch.add(phone)
-                    global_seen.add(phone)
-                    # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
-                    phone_with_prefix = (
-                        phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
-                    )
-                    row = {
-                        "phone": phone_with_prefix,
-                        "province": seg_info["province"],
-                        "city": seg_info["city"],
-                        "operator": seg_info["operator"],
-                    }
-                    results.append(row)
-            finally:
-                if db_conn is not None:
-                    db_conn.commit()
-                    db_conn.close()
+                seen_batch.add(phone)
+                global_seen.add(phone)
+                # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
+                phone_with_prefix = (
+                    phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
+                )
+                row = {
+                    "phone": phone_with_prefix,
+                    "province": seg_info["province"],
+                    "city": seg_info["city"],
+                    "operator": seg_info["operator"],
+                }
+                results.append(row)
 
             conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
             try:
