@@ -535,13 +535,6 @@
         </label>
         <label>号码去重</label>
       </div>
-      <div class="toggle-row">
-        <label class="switch">
-          <input type="checkbox" id="commercialUniqueToggle" checked />
-          <span class="slider"></span>
-        </label>
-        <label>商用防重（全局历史）</label>
-      </div>
       <button class="btn-generate" id="genBtn" onclick="generate()">生成号码</button>
       <button class="btn-generate" id="bulkBtn" style="margin-top:10px;background:#0f766e;" onclick="bulkExport()">一键分批导出CSV</button>
     </div>
@@ -904,7 +897,6 @@
     const count = parseInt(document.getElementById('countInput').value) || 10;
     const suffix_digits = parseInt(document.getElementById('suffixSelect').value);
     const unique = document.getElementById('uniqueToggle').checked;
-    const commercial_unique = document.getElementById('commercialUniqueToggle').checked;
     const mode = document.getElementById('modeSelect').value;
     const validate_limit = parseInt(document.getElementById('validateLimitInput').value || '100');
     const provider = document.getElementById('providerSelect').value;
@@ -934,7 +926,6 @@
           count,
           suffix_digits,
           unique,
-          commercial_unique,
           mode,
           validate_limit,
           provider,
@@ -945,13 +936,11 @@
 
       let finalResults = data.results;
       let dedupCount = 0;
-      if (commercial_unique) {
-        const localHistory = getLocalHistory();
-        const before = finalResults.length;
-        finalResults = finalResults.filter(r => !localHistory.has(r.phone));
-        dedupCount = before - finalResults.length;
-        addToLocalHistory(finalResults.map(r => r.phone));
-      }
+      const localHistory = getLocalHistory();
+      const before = finalResults.length;
+      finalResults = finalResults.filter(r => !localHistory.has(r.phone));
+      dedupCount = before - finalResults.length;
+      addToLocalHistory(finalResults.map(r => r.phone));
 
       resultData = finalResults;
       currentBatchId = data.batch_id || '';
@@ -990,7 +979,6 @@
     const total_count = parseInt(document.getElementById('countInput').value) || 100000;
     const suffix_digits = parseInt(document.getElementById('suffixSelect').value);
     const unique = document.getElementById('uniqueToggle').checked;
-    const commercial_unique = document.getElementById('commercialUniqueToggle').checked;
     const mode = document.getElementById('modeSelect').value;
 
     if (mode !== 'offline') {
@@ -1018,7 +1006,6 @@
           batch_size: 100000,
           suffix_digits,
           unique,
-          commercial_unique,
           mode,
         }),
       });
@@ -1030,25 +1017,22 @@
       }
 
       const rawBlob = await res.blob();
-      let finalBlob = rawBlob;
 
-      if (commercial_unique) {
-        // Parse CSV, filter against local history, re-encode
-        const text = await rawBlob.text();
-        const lines = text.split('\n');
-        const header = lines[0];
-        const localHistory = getLocalHistory();
-        const newPhones = [];
-        const filteredLines = lines.slice(1).filter(line => {
-          if (!line.trim()) return false;
-          const phone = line.split(',')[0].replace(/^\uFEFF/, '');
-          if (localHistory.has(phone)) return false;
-          newPhones.push(phone);
-          return true;
-        });
-        addToLocalHistory(newPhones);
-        finalBlob = new Blob([header + '\n' + filteredLines.join('\n')], { type: 'text/csv;charset=utf-8' });
-      }
+      // Parse CSV, filter against local history, re-encode
+      const text = await rawBlob.text();
+      const lines = text.split('\n');
+      const header = lines[0];
+      const localHistory = getLocalHistory();
+      const newPhones = [];
+      const filteredLines = lines.slice(1).filter(line => {
+        if (!line.trim()) return false;
+        const phone = line.split(',')[0].replace(/^\uFEFF/, '');
+        if (localHistory.has(phone)) return false;
+        newPhones.push(phone);
+        return true;
+      });
+      addToLocalHistory(newPhones);
+      const finalBlob = new Blob([header + '\n' + filteredLines.join('\n')], { type: 'text/csv;charset=utf-8' });
 
       const url = URL.createObjectURL(finalBlob);
       const a = document.createElement('a');
@@ -1082,7 +1066,7 @@
       return;
     }
     bar.style.display = 'flex';
-    txt.textContent = `批次号: ${data.batch_id} | 请求 ${data.requested} | 生成 ${data.count} | 商用防重: ${data.commercial_unique ? '开' : '关'}`;
+    txt.textContent = `批次号: ${data.batch_id} | 请求 ${data.requested} | 生成 ${data.count}`;
   }
 
   async function loadRecentBatches() {
@@ -1125,7 +1109,6 @@
         batch_id: data.batch_id,
         requested: data.requested_count,
         count: data.generated_count,
-        commercial_unique: !!data.commercial_unique,
       });
       showToast('批次已加载');
     } catch (e) {
