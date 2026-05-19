@@ -23,7 +23,7 @@ DATA_FILE = Path(__file__).parent / "data" / "phone_segments.csv"
 ISSUED_DB_FILE = Path(__file__).parent / "data" / "issued_numbers.db"
 ABSTRACT_API_KEY = os.getenv("ABSTRACT_API_KEY", "").strip()
 NUMVERIFY_API_KEY = os.getenv("NUMVERIFY_API_KEY", "").strip()
-MAX_GENERATE_COUNT = 100000
+MAX_GENERATE_COUNT = 5000000
 MAX_BULK_EXPORT_COUNT = 5000000
 
 # 非大陆地区（不加 86 前缀）
