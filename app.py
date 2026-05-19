@@ -184,12 +184,20 @@ def api_config():
     if NUMVERIFY_API_KEY:
         available_providers.append("numverify")
 
+    # Build cities_by_province: { province: sorted list of unique cities }
+    cities_by_province: dict[str, list[str]] = {}
+    for prov, segs in segments_by_province.items():
+        cities = sorted({seg["city"] for seg in segs if seg["city"]})
+        if cities:
+            cities_by_province[prov] = cities
+
     return jsonify({
         "provinces": all_provinces,
         "operators": sorted(all_operators),
         "api_enabled": bool(available_providers),
         "available_providers": available_providers,
         "segment_counts": {prov: len(segs) for prov, segs in segments_by_province.items()},
+        "cities_by_province": cities_by_province,
     })
 
 
@@ -313,6 +321,7 @@ def api_generate():
 
     provinces: list[str] = body.get("provinces", [])
     operators: list[str] = body.get("operators", [])
+    cities: list[str] = body.get("cities", [])
     count: int = max(1, int(body.get("count", 10)))
     unique: bool = bool(body.get("unique", True))
     suffix_digits: int = int(body.get("suffix_digits", 4))  # 7位号段补几位
@@ -354,6 +363,8 @@ def api_generate():
     for prov in (provinces if provinces else all_provinces):
         for seg in segments_by_province.get(prov, []):
             if operators and seg["operator"] not in operators:
+                continue
+            if cities and seg["city"] not in cities:
                 continue
             candidates.append({**seg, "province": prov})
 
@@ -496,6 +507,7 @@ def api_generate_bulk_export():
 
     provinces: list[str] = body.get("provinces", [])
     operators: list[str] = body.get("operators", [])
+    cities: list[str] = body.get("cities", [])
     total_count: int = max(1, int(body.get("total_count", 100000)))
     batch_size: int = max(1, int(body.get("batch_size", MAX_GENERATE_COUNT)))
     suffix_digits: int = int(body.get("suffix_digits", 4))
@@ -520,6 +532,8 @@ def api_generate_bulk_export():
     for prov in (provinces if provinces else all_provinces):
         for seg in segments_by_province.get(prov, []):
             if operators and seg["operator"] not in operators:
+                continue
+            if cities and seg["city"] not in cities:
                 continue
             candidates.append({**seg, "province": prov})
 
