@@ -26,6 +26,9 @@ NUMVERIFY_API_KEY = os.getenv("NUMVERIFY_API_KEY", "").strip()
 MAX_GENERATE_COUNT = 100000
 MAX_BULK_EXPORT_COUNT = 5000000
 
+# 非大陆地区（不加 86 前缀）
+NON_MAINLAND_REGIONS: frozenset[str] = frozenset({"韩国", "香港", "意大利"})
+
 app = Flask(__name__)
 
 # --------------------------------------------------------------------------- #
@@ -108,11 +111,16 @@ def load_data() -> None:
                 )
                 all_operators.add(op)
 
-    # 按省份名排序（直辖市置顶）
+    # 按省份名排序（直辖市置顶，非大陆地区置底）
     priority = ["北京", "上海", "天津", "重庆"]
-    rest = sorted(k for k in segments_by_province if k not in priority)
+    mainland_rest = sorted(
+        k for k in segments_by_province
+        if k not in priority and k not in NON_MAINLAND_REGIONS
+    )
+    non_mainland = [k for k in NON_MAINLAND_REGIONS if k in segments_by_province]
     all_provinces.extend([p for p in priority if p in segments_by_province])
-    all_provinces.extend(rest)
+    all_provinces.extend(mainland_rest)
+    all_provinces.extend(non_mainland)
 
     print(f"[数据] 已加载 {sum(len(v) for v in segments_by_province.values()):,} 条号段，"
           f"覆盖 {len(all_provinces)} 个省份")
@@ -349,8 +357,12 @@ def api_generate():
                     raise
 
             seen.add(phone)
+            # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
+            phone_with_prefix = (
+                phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
+            )
             results.append({
-                "phone":    "86" + phone,
+                "phone":    phone_with_prefix,
                 "province": seg_info["province"],
                 "city":     seg_info["city"],
                 "operator": seg_info["operator"],
@@ -395,7 +407,8 @@ def api_generate():
                 [
                     (
                         batch_id,
-                        row["phone"][2:],  # strip "86" prefix for internal storage
+                        # 大陆号码去掉 86 前缀存储；非大陆号码原样存储
+                        row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
                         row["province"],
                         row["city"],
                         row["operator"],
@@ -417,7 +430,8 @@ def api_generate():
 
     if mode == "online" and validate_limit > 0:
         for row in results[:validate_limit]:
-            raw_phone = row["phone"][2:]  # strip "86" prefix for API calls
+            # 大陆号码去掉 86 前缀后发给 API；非大陆号码原样发送
+            raw_phone = row["phone"][2:] if row.get("province") not in NON_MAINLAND_REGIONS else row["phone"]
             if current_provider == "abstract":
                 validated_result = validate_phone_with_abstract(raw_phone)
                 if validated_result.get("note") == "api_error" and "numverify" in available_providers:
@@ -555,8 +569,12 @@ def api_generate_bulk_export():
 
                     seen_batch.add(phone)
                     global_seen.add(phone)
+                    # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
+                    phone_with_prefix = (
+                        phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
+                    )
                     row = {
-                        "phone": "86" + phone,
+                        "phone": phone_with_prefix,
                         "province": seg_info["province"],
                         "city": seg_info["city"],
                         "operator": seg_info["operator"],
@@ -601,7 +619,8 @@ def api_generate_bulk_export():
                         [
                             (
                                 batch_id,
-                                row["phone"][2:],  # strip "86" prefix for internal storage
+                                # 大陆号码去掉 86 前缀存储；非大陆号码原样存储
+                                row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
                                 row["province"],
                                 row["city"],
                                 row["operator"],
@@ -723,10 +742,15 @@ def api_batch_export(batch_id: str):
     finally:
         conn.close()
 
-    # 返回 CSV
+    # 返回 CSV；大陆号码加 86 前缀，非大陆号码原样输出
     csv_lines = ["phone,province,city,operator"]
     csv_lines.extend(
-        f"86{n['phone']},{n['province']},{n['city']},{n['operator']}" for n in numbers
+        (
+            f"{n['phone']},{n['province']},{n['city']},{n['operator']}"
+            if n["province"] in NON_MAINLAND_REGIONS
+            else f"86{n['phone']},{n['province']},{n['city']},{n['operator']}"
+        )
+        for n in numbers
     )
     csv_content = "\n".join(csv_lines)
 
