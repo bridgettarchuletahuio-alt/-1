@@ -592,11 +592,12 @@
       if (!res.ok) { showToast(data.error || '生成失败'); return; }
       resultData = data.results;
       currentBatchId = data.batch_id || '';
-      renderTable(resultData);
+      downloadCSV();
       const stat = data.mode === 'online'
-        ? `共 ${data.count} 条，已在线校验 ${data.validated} 条（通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}）`
-        : `共 ${data.count} 条（离线模式）`;
+        ? `已生成 ${data.count} 条号码，已自动下载（在线校验 ${data.validated} 条，通道: ${data.provider || 'auto'}${data.fallback_used ? '，已触发兜底' : ''}）`
+        : `已生成 ${data.count} 条号码，已自动下载`;
       document.getElementById('resultStat').textContent = stat;
+      document.getElementById('resultArea').innerHTML = `<div class="empty-state"><div class="icon">✅</div><div>${stat}</div></div>`;
       renderBatchBar(data);
       if (data.requested && data.count < data.requested) {
         showToast(`仅生成 ${data.count}/${data.requested} 条，可能是防重后可用号码不足`);
@@ -803,12 +804,8 @@
 
   function downloadCSV() {
     if (!resultData.length) { showToast('暂无数据'); return; }
-    const header = 'phone,province,city,operator,valid,country,line_type,carrier\n';
-    const rows = resultData.map(r => {
-      const valid = r.valid === undefined ? '' : (r.valid ? 'true' : 'false');
-      return `${r.phone},${r.province},${r.city},${r.operator},${valid},${r.country || ''},${r.line_type || ''},${r.carrier || ''}`;
-    }).join('\n');
-    const blob = new Blob(['\uFEFF' + header + rows], { type: 'text/csv;charset=utf-8' });
+    const content = resultData.map(r => r.phone).join('\n');
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.href = url; a.download = 'generated_phones.csv';
     a.click(); URL.revokeObjectURL(url);
