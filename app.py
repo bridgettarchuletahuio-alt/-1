@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, session
 
 DATA_FILE = Path(__file__).parent / "data" / "phone_segments.csv"
 ISSUED_DB_FILE = Path(__file__).parent / "data" / "issued_numbers.db"
@@ -30,6 +30,9 @@ MAX_BULK_EXPORT_COUNT = 5000000
 NON_MAINLAND_REGIONS: frozenset[str] = frozenset({"韩国", "香港", "意大利"})
 
 app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "phone-tool-secret-key-change-in-prod")
+
+LOGIN_PASSWORD = "xiaozhangnb"
 
 # --------------------------------------------------------------------------- #
 # 数据加载（启动时一次性读入内存）
@@ -130,24 +133,63 @@ load_data()
 init_issued_db()
 
 # --------------------------------------------------------------------------- #
+# 认证
+# --------------------------------------------------------------------------- #
+
+def is_authenticated() -> bool:
+    return session.get("authenticated") is True
+
+
+def require_auth():
+    """Return a 401 JSON response if not authenticated, else None."""
+    if not is_authenticated():
+        return jsonify({"error": "未授权，请先登录"}), 401
+    return None
+
+
+@app.post("/api/login")
+def api_login():
+    body = request.get_json(silent=True) or {}
+    password = str(body.get("password", "")).strip()
+    if password == LOGIN_PASSWORD:
+        session["authenticated"] = True
+        return jsonify({"ok": True})
+    return jsonify({"error": "密码错误"}), 401
+
+
+@app.post("/api/logout")
+def api_logout():
+    session.clear()
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # 路由
 # --------------------------------------------------------------------------- #
 
 @app.get("/")
 def index():
+    return render_template("index.html")
+
+
+@app.get("/api/config")
+def api_config():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
     available_providers: list[str] = []
     if ABSTRACT_API_KEY:
         available_providers.append("abstract")
     if NUMVERIFY_API_KEY:
         available_providers.append("numverify")
 
-    return render_template(
-        "index.html",
-        provinces=all_provinces,
-        operators=sorted(all_operators),
-        api_enabled=bool(available_providers),
-        available_providers=available_providers,
-    )
+    return jsonify({
+        "provinces": all_provinces,
+        "operators": sorted(all_operators),
+        "api_enabled": bool(available_providers),
+        "available_providers": available_providers,
+    })
 
 
 def fetch_json(url: str) -> dict:
@@ -247,16 +289,25 @@ def validate_phone_with_numverify(phone: str) -> dict[str, str | bool]:
 
 @app.get("/api/provinces")
 def api_provinces():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     return jsonify(all_provinces)
 
 
 @app.get("/api/operators")
 def api_operators():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     return jsonify(sorted(all_operators))
 
 
 @app.post("/api/generate")
 def api_generate():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     body = request.get_json(silent=True) or {}
 
     provinces: list[str] = body.get("provinces", [])
@@ -473,6 +524,9 @@ def api_generate():
 
 @app.post("/api/generate/bulk-export")
 def api_generate_bulk_export():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     body = request.get_json(silent=True) or {}
 
     provinces: list[str] = body.get("provinces", [])
@@ -650,6 +704,9 @@ def api_generate_bulk_export():
 
 @app.get("/api/batches")
 def api_batches():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     limit = max(1, min(int(request.args.get("limit", 20)), 200))
     conn = sqlite3.connect(ISSUED_DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -672,6 +729,9 @@ def api_batches():
 
 @app.get("/api/batches/<batch_id>")
 def api_batch_detail(batch_id: str):
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     conn = sqlite3.connect(ISSUED_DB_FILE)
     conn.row_factory = sqlite3.Row
     try:
@@ -709,6 +769,9 @@ def api_batch_detail(batch_id: str):
 
 @app.post("/api/batches/<batch_id>/void")
 def api_batch_void(batch_id: str):
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     conn = sqlite3.connect(ISSUED_DB_FILE)
     try:
         cur = conn.execute(
@@ -725,6 +788,9 @@ def api_batch_void(batch_id: str):
 
 @app.get("/api/batches/<batch_id>/export")
 def api_batch_export(batch_id: str):
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
     conn = sqlite3.connect(ISSUED_DB_FILE)
     conn.row_factory = sqlite3.Row
     try:
