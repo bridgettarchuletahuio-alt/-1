@@ -807,9 +807,9 @@
     const content = resultData.map(r => r.phone).join('\n');
     const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'generated_phones.csv';
+    const a = document.createElement('a'); a.href = url; a.download = 'generated_phones.txt';
     a.click(); URL.revokeObjectURL(url);
-    showToast('CSV 已下载');
+    showToast('TXT 已下载');
   }
 
   function clearResult() {
