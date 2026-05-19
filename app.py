@@ -73,7 +73,6 @@ def init_issued_db() -> None:
                 provinces_json TEXT NOT NULL,
                 operators_json TEXT NOT NULL,
                 suffix_digits INTEGER NOT NULL,
-                commercial_unique INTEGER NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active'
             )
         """)
@@ -96,9 +95,41 @@ def init_issued_db() -> None:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(issued_numbers)")}
         if "batch_id" not in columns:
             conn.execute("ALTER TABLE issued_numbers ADD COLUMN batch_id TEXT")
+
+        # 迁移 generation_batches：移除 commercial_unique 列（如果存在）
+        # SQLite 不直接支持 DROP COLUMN（3.35 以下），使用重建表方式
+        batch_cols = {row[1] for row in conn.execute("PRAGMA table_info(generation_batches)")}
+        if "commercial_unique" in batch_cols:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS generation_batches_new (
+                    batch_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    requested_count INTEGER NOT NULL,
+                    generated_count INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    provinces_json TEXT NOT NULL,
+                    operators_json TEXT NOT NULL,
+                    suffix_digits INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                )
+            """)
+            conn.execute("""
+                INSERT INTO generation_batches_new
+                    (batch_id, created_at, requested_count, generated_count,
+                     mode, provider, provinces_json, operators_json, suffix_digits, status)
+                SELECT batch_id, created_at, requested_count, generated_count,
+                       mode, provider, provinces_json, operators_json, suffix_digits, status
+                FROM generation_batches
+            """)
+            conn.execute("DROP TABLE generation_batches")
+            conn.execute("ALTER TABLE generation_batches_new RENAME TO generation_batches")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_created_at ON generation_batches(created_at)")
+
         conn.commit()
     finally:
         conn.close()
+
 
 
 def load_data() -> None:
@@ -325,7 +356,6 @@ def api_generate():
     count: int = max(1, int(body.get("count", 10)))
     unique: bool = bool(body.get("unique", True))
     suffix_digits: int = int(body.get("suffix_digits", 4))  # 7位号段补几位
-    commercial_unique: bool = bool(body.get("commercial_unique", True))
     mode: str = str(body.get("mode", "offline")).strip().lower()
     validate_limit: int = max(0, int(body.get("validate_limit", 100)))
     provider: str = str(body.get("provider", "auto")).strip().lower()
@@ -408,8 +438,8 @@ def api_generate():
             INSERT INTO generation_batches(
                 batch_id, created_at, requested_count, generated_count,
                 mode, provider, provinces_json, operators_json,
-                suffix_digits, commercial_unique, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                suffix_digits, status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
             """,
             (
                 batch_id,
@@ -421,7 +451,6 @@ def api_generate():
                 json.dumps(provinces, ensure_ascii=False),
                 json.dumps(operators, ensure_ascii=False),
                 suffix_digits,
-                1 if commercial_unique else 0,
             ),
         )
 
@@ -485,7 +514,6 @@ def api_generate():
     return jsonify({
         "count": len(results),
         "requested": count,
-        "commercial_unique": commercial_unique,
         "max_attempts": max_attempts,
         "batch_id": batch_id,
         "results": results,
@@ -512,9 +540,6 @@ def api_generate_bulk_export():
     batch_size: int = max(1, int(body.get("batch_size", MAX_GENERATE_COUNT)))
     suffix_digits: int = int(body.get("suffix_digits", 4))
     unique: bool = bool(body.get("unique", True))
-    commercial_unique: bool = bool(body.get("commercial_unique", True))
-    mode: str = str(body.get("mode", "offline")).strip().lower()
-
     if mode != "offline":
         return jsonify({"error": "分批导出仅支持离线模式"}), 400
     if total_count > MAX_BULK_EXPORT_COUNT:
@@ -594,8 +619,8 @@ def api_generate_bulk_export():
                     INSERT INTO generation_batches(
                         batch_id, created_at, requested_count, generated_count,
                         mode, provider, provinces_json, operators_json,
-                        suffix_digits, commercial_unique, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                        suffix_digits, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
                     """,
                     (
                         batch_id,
@@ -607,7 +632,6 @@ def api_generate_bulk_export():
                         json.dumps(provinces, ensure_ascii=False),
                         json.dumps(operators, ensure_ascii=False),
                         suffix_digits,
-                        1 if commercial_unique else 0,
                     ),
                 )
 
@@ -661,7 +685,7 @@ def api_batches():
         rows = conn.execute(
             """
             SELECT batch_id, created_at, requested_count, generated_count,
-                   mode, provider, suffix_digits, commercial_unique, status
+                   mode, provider, suffix_digits, status
             FROM generation_batches
             ORDER BY created_at DESC
             LIMIT ?
@@ -686,7 +710,7 @@ def api_batch_detail(batch_id: str):
             """
             SELECT batch_id, created_at, requested_count, generated_count,
                    mode, provider, provinces_json, operators_json,
-                   suffix_digits, commercial_unique, status
+                   suffix_digits, status
             FROM generation_batches
             WHERE batch_id = ?
             """,
