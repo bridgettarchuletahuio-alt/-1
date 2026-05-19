@@ -402,7 +402,7 @@
         <label>生成数量</label>
         <input type="number" id="countInput" value="20" min="1" max="5000000" />
       </div>
-      <div class="hint">普通生成单次最多 100000 条；若超过 100000，点击「一键分批导出CSV」。</div>
+      <div class="hint">普通生成单次最多 5000000 条；若超过 5000000，点击「一键分批导出CSV」。</div>
       <div class="param-row">
         <label>生成模式</label>
         <select id="modeSelect" onchange="toggleOnlineConfig()">
@@ -558,8 +558,8 @@
     const validate_limit = parseInt(document.getElementById('validateLimitInput').value || '100');
     const provider = document.getElementById('providerSelect').value;
 
-    if (count > 100000) {
-      showToast('单次最多生成 100000 条，请分批生成');
+    if (count > 5000000) {
+      showToast('单次最多生成 5000000 条，请分批生成');
       return;
     }
 
