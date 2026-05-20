@@ -416,79 +416,116 @@ def api_generate():
     created_at = datetime.now(timezone.utc).isoformat()
     batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
 
-    for _ in range(max_attempts):
-        if len(results) >= count:
-            break
-        seg_info = random.choice(candidates)
-        suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
-        phone = seg_info["segment"] + suffix
-
-        if unique and phone in seen:
-            continue
-
-        seen.add(phone)
-        # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
-        phone_with_prefix = (
-            phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
-        )
-        results.append({
-            "phone":    phone_with_prefix,
-            "province": seg_info["province"],
-            "city":     seg_info["city"],
-            "operator": seg_info["operator"],
-        })
-
-    # 批次记录：无论是否开启商用防重都写入，便于追溯与导出
-    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
+    # Open a single connection for the entire generation loop so we can check
+    # issued_numbers globally (across all users/browsers/requests) before
+    # accepting each candidate number.
     try:
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute(
-            """
-            INSERT INTO generation_batches(
-                batch_id, created_at, requested_count, generated_count,
-                mode, provider, provinces_json, operators_json,
-                suffix_digits, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
-            """,
-            (
-                batch_id,
-                created_at,
-                count,
-                len(results),
-                mode,
-                current_provider if mode == "online" else "offline",
-                json.dumps(provinces, ensure_ascii=False),
-                json.dumps(operators, ensure_ascii=False),
-                suffix_digits,
-            ),
-        )
-
-        if results:
-            conn.executemany(
-                """
-                INSERT OR IGNORE INTO batch_numbers(batch_id, phone, province, city, operator, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        batch_id,
-                        # 大陆号码去掉 86 前缀存储；非大陆号码原样存储
-                        row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
-                        row["province"],
-                        row["city"],
-                        row["operator"],
-                        created_at,
-                    )
-                    for row in results
-                ],
-            )
-        conn.commit()
+        gen_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             return jsonify({"error": "数据库繁忙，请稍后重试"}), 503
         raise
+    try:
+        gen_conn.execute("PRAGMA journal_mode=WAL")
+        gen_conn.execute("PRAGMA busy_timeout=30000")
+
+        for _ in range(max_attempts):
+            if len(results) >= count:
+                break
+            seg_info = random.choice(candidates)
+            suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
+            phone = seg_info["segment"] + suffix
+
+            # In-request dedup (fast, in-memory)
+            if unique and phone in seen:
+                continue
+
+            # Global dedup: skip numbers already issued in any previous request
+            existing = gen_conn.execute(
+                "SELECT 1 FROM issued_numbers WHERE phone = ?", (phone,)
+            ).fetchone()
+            if existing:
+                continue
+
+            seen.add(phone)
+            # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
+            phone_with_prefix = (
+                phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
+            )
+            results.append({
+                "phone":    phone_with_prefix,
+                "province": seg_info["province"],
+                "city":     seg_info["city"],
+                "operator": seg_info["operator"],
+            })
+
+        # Persist batch metadata, issued numbers, and batch-number mapping
+        try:
+            gen_conn.execute(
+                """
+                INSERT INTO generation_batches(
+                    batch_id, created_at, requested_count, generated_count,
+                    mode, provider, provinces_json, operators_json,
+                    suffix_digits, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                """,
+                (
+                    batch_id,
+                    created_at,
+                    count,
+                    len(results),
+                    mode,
+                    current_provider if mode == "online" else "offline",
+                    json.dumps(provinces, ensure_ascii=False),
+                    json.dumps(operators, ensure_ascii=False),
+                    suffix_digits,
+                ),
+            )
+
+            if results:
+                # Insert into global issued_numbers for permanent cross-request dedup
+                gen_conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO issued_numbers(phone, province, city, operator, created_at, batch_id)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
+                            row["province"],
+                            row["city"],
+                            row["operator"],
+                            created_at,
+                            batch_id,
+                        )
+                        for row in results
+                    ],
+                )
+                gen_conn.executemany(
+                    """
+                    INSERT OR IGNORE INTO batch_numbers(batch_id, phone, province, city, operator, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            batch_id,
+                            # 大陆号码去掉 86 前缀存储；非大陆号码原样存储
+                            row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
+                            row["province"],
+                            row["city"],
+                            row["operator"],
+                            created_at,
+                        )
+                        for row in results
+                    ],
+                )
+            gen_conn.commit()
+        except sqlite3.OperationalError as exc:
+            if "database is locked" in str(exc).lower():
+                return jsonify({"error": "数据库繁忙，请稍后重试"}), 503
+            raise
     finally:
-        conn.close()
+        gen_conn.close()
 
     validated = 0
     fallback_used = False
@@ -549,6 +586,7 @@ def api_generate_bulk_export():
     batch_size: int = max(1, int(body.get("batch_size", MAX_GENERATE_COUNT)))
     suffix_digits: int = int(body.get("suffix_digits", 4))
     unique: bool = bool(body.get("unique", True))
+    mode: str = str(body.get("mode", "offline")).strip().lower()
     if mode != "offline":
         return jsonify({"error": "分批导出仅支持离线模式"}), 400
     if total_count > MAX_BULK_EXPORT_COUNT:
@@ -574,6 +612,9 @@ def api_generate_bulk_export():
     if not candidates:
         return jsonify({"error": "无匹配号段，请调整筛选条件"}), 400
 
+    # global_seen tracks numbers issued within this streaming request (in-memory,
+    # cross-batch within the same bulk export).  The issued_numbers table provides
+    # permanent cross-request dedup.
     global_seen: set[str] = set()
 
     def make_csv_line(row: dict[str, str]) -> str:
@@ -586,93 +627,129 @@ def api_generate_bulk_export():
         yield "\ufeffphone,province,city,operator\n"
 
         remaining = total_count
-        while remaining > 0:
-            request_count = min(batch_size, remaining)
-            results: list[dict] = []
-            seen_batch: set[str] = set()
-            max_attempts = max(request_count * 50, 2000)
-            created_at = datetime.now(timezone.utc).isoformat()
-            batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
+        # Reuse one DB connection for the entire streaming export so that numbers
+        # inserted in earlier batches are visible when checking later batches.
+        bulk_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
+        try:
+            bulk_conn.execute("PRAGMA journal_mode=WAL")
+            bulk_conn.execute("PRAGMA busy_timeout=30000")
 
-            for _ in range(max_attempts):
-                if len(results) >= request_count:
-                    break
+            while remaining > 0:
+                request_count = min(batch_size, remaining)
+                results: list[dict] = []
+                seen_batch: set[str] = set()
+                max_attempts = max(request_count * 50, 2000)
+                created_at = datetime.now(timezone.utc).isoformat()
+                batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
 
-                seg_info = random.choice(candidates)
-                suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
-                phone = seg_info["segment"] + suffix
+                for _ in range(max_attempts):
+                    if len(results) >= request_count:
+                        break
 
-                if unique and (phone in seen_batch or phone in global_seen):
-                    continue
+                    seg_info = random.choice(candidates)
+                    suffix = str(random.randint(0, 10 ** suffix_digits - 1)).zfill(suffix_digits)
+                    phone = seg_info["segment"] + suffix
 
-                seen_batch.add(phone)
-                global_seen.add(phone)
-                # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
-                phone_with_prefix = (
-                    phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
-                )
-                row = {
-                    "phone": phone_with_prefix,
-                    "province": seg_info["province"],
-                    "city": seg_info["city"],
-                    "operator": seg_info["operator"],
-                }
-                results.append(row)
+                    # In-request dedup (fast, in-memory)
+                    if unique and (phone in seen_batch or phone in global_seen):
+                        continue
 
+                    # Global dedup: skip numbers already issued in any previous request
+                    existing = bulk_conn.execute(
+                        "SELECT 1 FROM issued_numbers WHERE phone = ?", (phone,)
+                    ).fetchone()
+                    if existing:
+                        continue
 
-            conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
-            try:
-                conn.execute("PRAGMA busy_timeout=30000")
-                conn.execute(
-                    """
-                    INSERT INTO generation_batches(
-                        batch_id, created_at, requested_count, generated_count,
-                        mode, provider, provinces_json, operators_json,
-                        suffix_digits, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
-                    """,
-                    (
-                        batch_id,
-                        created_at,
-                        request_count,
-                        len(results),
-                        "offline",
-                        "offline",
-                        json.dumps(provinces, ensure_ascii=False),
-                        json.dumps(operators, ensure_ascii=False),
-                        suffix_digits,
-                    ),
-                )
-
-                if results:
-                    conn.executemany(
-                        """
-                        INSERT OR IGNORE INTO batch_numbers(batch_id, phone, province, city, operator, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            (
-                                batch_id,
-                                # 大陆号码去掉 86 前缀存储；非大陆号码原样存储
-                                row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
-                                row["province"],
-                                row["city"],
-                                row["operator"],
-                                created_at,
-                            )
-                            for row in results
-                        ],
+                    seen_batch.add(phone)
+                    global_seen.add(phone)
+                    # 仅大陆号码加 86 前缀；非大陆地区（韩国、香港、意大利）不加前缀
+                    phone_with_prefix = (
+                        phone if seg_info["province"] in NON_MAINLAND_REGIONS else "86" + phone
                     )
-                conn.commit()
-            finally:
-                conn.close()
+                    row = {
+                        "phone": phone_with_prefix,
+                        "province": seg_info["province"],
+                        "city": seg_info["city"],
+                        "operator": seg_info["operator"],
+                    }
+                    results.append(row)
 
-            for row in results:
-                yield make_csv_line(row)
+                try:
+                    bulk_conn.execute(
+                        """
+                        INSERT INTO generation_batches(
+                            batch_id, created_at, requested_count, generated_count,
+                            mode, provider, provinces_json, operators_json,
+                            suffix_digits, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                        """,
+                        (
+                            batch_id,
+                            created_at,
+                            request_count,
+                            len(results),
+                            "offline",
+                            "offline",
+                            json.dumps(provinces, ensure_ascii=False),
+                            json.dumps(operators, ensure_ascii=False),
+                            suffix_digits,
+                        ),
+                    )
 
-            if not results:
-                break
-            remaining -= len(results)
+                    if results:
+                        # Insert into global issued_numbers for permanent cross-request dedup
+                        bulk_conn.executemany(
+                            """
+                            INSERT OR IGNORE INTO issued_numbers(phone, province, city, operator, created_at, batch_id)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                (
+                                    row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
+                                    row["province"],
+                                    row["city"],
+                                    row["operator"],
+                                    created_at,
+                                    batch_id,
+                                )
+                                for row in results
+                            ],
+                        )
+                        bulk_conn.executemany(
+                            """
+                            INSERT OR IGNORE INTO batch_numbers(batch_id, phone, province, city, operator, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            [
+                                (
+                                    batch_id,
+                                    # 大陆号码去掉 86 前缀存储；非大陆号码原样存储
+                                    row["phone"][2:] if row["province"] not in NON_MAINLAND_REGIONS else row["phone"],
+                                    row["province"],
+                                    row["city"],
+                                    row["operator"],
+                                    created_at,
+                                )
+                                for row in results
+                            ],
+                        )
+                    bulk_conn.commit()
+                except sqlite3.OperationalError as exc:
+                    if "database is locked" in str(exc).lower():
+                        # Yield nothing further; the client will receive a truncated
+                        # CSV — the HTTP headers are already sent at this point.
+                        return
+                    raise
+
+                for row in results:
+                    yield make_csv_line(row)
+
+                if not results:
+                    break
+                remaining -= len(results)
+        finally:
+            bulk_conn.close()
 
     filename = f"bulk_generated_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}.csv"
     return Response(
