@@ -216,6 +216,8 @@
     }
     .op-tag:hover { border-color: var(--primary); color: var(--primary); }
     .op-tag.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    .city-stat { font-size: .72rem; opacity: .8; letter-spacing: 0; }
+    .op-tag.active .city-stat { opacity: .9; }
 
     /* ---- 参数区 ---- */
     .param-row {
@@ -507,7 +509,8 @@
         <button onclick="selectAll()">全选</button>
         <button onclick="clearAll()">清空</button>
         <button id="clearProvHistoryBtn" onclick="clearProvHistory()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除各省份已生成计数">清除省份历史</button>
-        <button id="clearCitySelectionBtn" onclick="clearCitySelectionAndUpdate()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除已保存的市区选择">清除市区历史</button>
+        <button id="clearCitySelectionBtn" onclick="clearCitySelectionAndUpdate()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除已保存的市区选择">清除市区选择</button>
+        <button id="clearCityHistoryBtn" onclick="clearCityHistory()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除各市区已生成计数">清除市区历史</button>
       </div>
     </div>
 
@@ -633,8 +636,9 @@
   let currentBatchId = '';
   let apiEnabled = false;
   let availableProviders = [];
-  let segmentCounts = {};   // { province: segmentCount } — populated from /api/config
-  let citiesByProvince = {}; // { province: [city, ...] } — populated from /api/config
+  let segmentCounts = {};         // { province: segmentCount } — populated from /api/config
+  let citiesByProvince = {};      // { province: [city, ...] } — populated from /api/config
+  let segmentCountsByCity = {};   // { city: segmentCount } — populated from /api/config
 
   // ---------- localStorage 可用性检测 ----------
   let localStorageAvailable = false;
@@ -654,26 +658,29 @@
 
   function applyLocalStorageStatus() {
     localStorageAvailable = checkLocalStorage();
-    const banner      = document.getElementById('localStorageBanner');
-    const badge       = document.getElementById('lsStatusBadge');
-    const clearBtn    = document.getElementById('clearLocalHistoryBtn');
-    const provBtn     = document.getElementById('clearProvHistoryBtn');
-    const citySelBtn  = document.getElementById('clearCitySelectionBtn');
+    const banner         = document.getElementById('localStorageBanner');
+    const badge          = document.getElementById('lsStatusBadge');
+    const clearBtn       = document.getElementById('clearLocalHistoryBtn');
+    const provBtn        = document.getElementById('clearProvHistoryBtn');
+    const citySelBtn     = document.getElementById('clearCitySelectionBtn');
+    const cityHistBtn    = document.getElementById('clearCityHistoryBtn');
 
     if (localStorageAvailable) {
       banner.classList.remove('visible');
       badge.className = 'ls-status ok';
       badge.textContent = '🟢 本地存储正常';
-      if (clearBtn)   { clearBtn.disabled   = false; clearBtn.title   = ''; }
-      if (provBtn)    { provBtn.disabled     = false; provBtn.title    = ''; }
-      if (citySelBtn) { citySelBtn.disabled  = false; citySelBtn.title = ''; }
+      if (clearBtn)    { clearBtn.disabled    = false; clearBtn.title    = ''; }
+      if (provBtn)     { provBtn.disabled      = false; provBtn.title     = ''; }
+      if (citySelBtn)  { citySelBtn.disabled   = false; citySelBtn.title  = ''; }
+      if (cityHistBtn) { cityHistBtn.disabled  = false; cityHistBtn.title = ''; }
     } else {
       banner.classList.add('visible');
       badge.className = 'ls-status fail';
       badge.textContent = '🔴 本地存储不可用';
-      if (clearBtn)   { clearBtn.disabled   = true; clearBtn.title   = '本地存储不可用'; }
-      if (provBtn)    { provBtn.disabled     = true; provBtn.title    = '本地存储不可用'; }
-      if (citySelBtn) { citySelBtn.disabled  = true; citySelBtn.title = '本地存储不可用'; }
+      if (clearBtn)    { clearBtn.disabled    = true; clearBtn.title    = '本地存储不可用'; }
+      if (provBtn)     { provBtn.disabled      = true; provBtn.title     = '本地存储不可用'; }
+      if (citySelBtn)  { citySelBtn.disabled   = true; citySelBtn.title  = '本地存储不可用'; }
+      if (cityHistBtn) { cityHistBtn.disabled  = true; cityHistBtn.title = '本地存储不可用'; }
     }
   }
 
@@ -751,6 +758,79 @@
     }
   }
 
+  // ---------- 市区生成计数（localStorage）----------
+  const CITY_HISTORY_KEY = 'phone_gen_by_city';
+
+  function getCityHistory() {
+    try {
+      return JSON.parse(localStorage.getItem(CITY_HISTORY_KEY) || '{}');
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function addToCityHistory(cities, totalGenerated) {
+    if (!cities || cities.length === 0) return;
+    const history = getCityHistory();
+    const perCity = Math.round(totalGenerated / cities.length);
+    const remainder = totalGenerated - perCity * cities.length;
+    cities.forEach((c, i) => {
+      history[c] = (history[c] || 0) + perCity + (i === 0 ? remainder : 0);
+    });
+    try {
+      localStorage.setItem(CITY_HISTORY_KEY, JSON.stringify(history));
+    } catch (e) {
+      const reason = e && e.name === 'QuotaExceededError'
+        ? '本地存储空间已满，市区计数未能保存'
+        : `市区计数写入失败（${e && e.name || '未知错误'}）`;
+      showToast('⚠️ ' + reason);
+      console.warn('[localStorage] addToCityHistory 失败:', e);
+    }
+    updateCityStats();
+  }
+
+  function clearCityHistory() {
+    try {
+      localStorage.removeItem(CITY_HISTORY_KEY);
+    } catch (e) {
+      showToast('⚠️ 清除市区历史失败：' + (e && e.message || '未知错误'));
+      return;
+    }
+    updateCityStats();
+    showToast('市区历史已清除');
+  }
+
+  function getCityTotal(city, suffixDigits) {
+    const segs = segmentCountsByCity[city] || 0;
+    return segs * Math.pow(10, suffixDigits);
+  }
+
+  function updateCityStats() {
+    const suffixDigits = parseInt(document.getElementById('suffixSelect').value);
+    const history = getCityHistory();
+    document.querySelectorAll('#cityGroup .op-tag').forEach(tag => {
+      const city = tag.dataset.city;
+      if (!city) return;
+      const generated = history[city] || 0;
+      const total = getCityTotal(city, suffixDigits);
+      const remaining = Math.max(0, total - generated);
+      // Update or create the stat span inside the tag
+      let statEl = tag.querySelector('.city-stat');
+      if (!statEl) {
+        statEl = document.createElement('span');
+        statEl.className = 'city-stat';
+        tag.appendChild(statEl);
+      }
+      if (total > 0) {
+        statEl.textContent = ` [${fmtNum(generated)}/${fmtNum(total)}]`;
+        tag.title = `已生成: ${fmtNum(generated)}  剩余: ${fmtNum(remaining)}  总计: ${fmtNum(total)}`;
+      } else {
+        statEl.textContent = '';
+        tag.title = '';
+      }
+    });
+  }
+
   // ---------- 省份生成计数（localStorage）----------
   const PROV_HISTORY_KEY = 'phone_gen_by_province';
 
@@ -799,7 +879,7 @@
     // Deselect all city tags in the DOM
     document.querySelectorAll('#cityGroup .op-tag.active').forEach(t => t.classList.remove('active'));
     updateCityCount();
-    showToast('市区历史已清除');
+    showToast('市区选择已清除');
   }
 
 
@@ -882,6 +962,7 @@
       availableProviders = cfg.available_providers || [];
       segmentCounts = cfg.segment_counts || {};
       citiesByProvince = cfg.cities_by_province || {};
+      segmentCountsByCity = cfg.segment_counts_by_city || {};
 
       // Populate province grid
       const grid = document.getElementById('provGrid');
@@ -904,6 +985,7 @@
       applyLocalStorageStatus();
       updateLocalHistoryCount();
       updateProvStats();
+      updateCityStats();
     } catch (e) {
       showToast('初始化失败: ' + e.message);
     }
@@ -991,6 +1073,7 @@
 
     cityCard.style.display = '';
     updateCityCount();
+    updateCityStats();
   }
 
   function toggleCity(tag) {
@@ -1013,6 +1096,7 @@
 
   document.getElementById('suffixSelect').addEventListener('change', function () {
     updateProvStats();
+    updateCityStats();
   });
 
   // ---------- 运营商 ----------
@@ -1103,8 +1187,7 @@
       // Update per-province / per-city generation tracking
       if (finalResults.length > 0) {
         if (cities.length > 0) {
-          // Track by city when cities are explicitly selected
-          addToProvHistory(cities, finalResults.length);
+          addToCityHistory(cities, finalResults.length);
         } else if (provinces.length > 0) {
           addToProvHistory(provinces, finalResults.length);
         }
@@ -1192,7 +1275,7 @@
       // Update per-province / per-city generation tracking
       if (total_count > 0) {
         if (cities.length > 0) {
-          addToProvHistory(cities, total_count);
+          addToCityHistory(cities, total_count);
         } else if (provinces.length > 0) {
           addToProvHistory(provinces, total_count);
         }

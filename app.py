@@ -222,6 +222,14 @@ def api_config():
         if cities:
             cities_by_province[prov] = cities
 
+    # Build segment_counts_by_city: { city: number of segments }
+    segment_counts_by_city: dict[str, int] = defaultdict(int)
+    for segs in segments_by_province.values():
+        for seg in segs:
+            city = seg.get("city", "")
+            if city:
+                segment_counts_by_city[city] += 1
+
     return jsonify({
         "provinces": all_provinces,
         "operators": sorted(all_operators),
@@ -229,6 +237,7 @@ def api_config():
         "available_providers": available_providers,
         "segment_counts": {prov: len(segs) for prov, segs in segments_by_province.items()},
         "cities_by_province": cities_by_province,
+        "segment_counts_by_city": dict(segment_counts_by_city),
     })
 
 
