@@ -507,8 +507,10 @@
         <button onclick="selectAll()">全选</button>
         <button onclick="clearAll()">清空</button>
         <button id="clearProvHistoryBtn" onclick="clearProvHistory()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除各省份已生成计数">清除省份历史</button>
+        <button id="clearCitySelectionBtn" onclick="clearCitySelectionAndUpdate()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除已保存的市区选择">清除市区历史</button>
       </div>
     </div>
+
 
     <!-- 市区选择 -->
     <div class="card" id="cityCard" style="display:none;">
@@ -652,25 +654,29 @@
 
   function applyLocalStorageStatus() {
     localStorageAvailable = checkLocalStorage();
-    const banner   = document.getElementById('localStorageBanner');
-    const badge    = document.getElementById('lsStatusBadge');
-    const clearBtn = document.getElementById('clearLocalHistoryBtn');
-    const provBtn  = document.getElementById('clearProvHistoryBtn');
+    const banner      = document.getElementById('localStorageBanner');
+    const badge       = document.getElementById('lsStatusBadge');
+    const clearBtn    = document.getElementById('clearLocalHistoryBtn');
+    const provBtn     = document.getElementById('clearProvHistoryBtn');
+    const citySelBtn  = document.getElementById('clearCitySelectionBtn');
 
     if (localStorageAvailable) {
       banner.classList.remove('visible');
       badge.className = 'ls-status ok';
       badge.textContent = '🟢 本地存储正常';
-      if (clearBtn) { clearBtn.disabled = false; clearBtn.title = ''; }
-      if (provBtn)  { provBtn.disabled  = false; provBtn.title  = ''; }
+      if (clearBtn)   { clearBtn.disabled   = false; clearBtn.title   = ''; }
+      if (provBtn)    { provBtn.disabled     = false; provBtn.title    = ''; }
+      if (citySelBtn) { citySelBtn.disabled  = false; citySelBtn.title = ''; }
     } else {
       banner.classList.add('visible');
       badge.className = 'ls-status fail';
       badge.textContent = '🔴 本地存储不可用';
-      if (clearBtn) { clearBtn.disabled = true; clearBtn.title = '本地存储不可用'; }
-      if (provBtn)  { provBtn.disabled  = true; provBtn.title  = '本地存储不可用'; }
+      if (clearBtn)   { clearBtn.disabled   = true; clearBtn.title   = '本地存储不可用'; }
+      if (provBtn)    { provBtn.disabled     = true; provBtn.title    = '本地存储不可用'; }
+      if (citySelBtn) { citySelBtn.disabled  = true; citySelBtn.title = '本地存储不可用'; }
     }
   }
+
 
   // ---------- 本地历史（per-user localStorage 去重）----------
   const LOCAL_HISTORY_KEY = 'phone_gen_local_history';
@@ -718,6 +724,33 @@
     showToast('本地历史已清除');
   }
 
+  // ---------- 市区选择持久化（localStorage）----------
+  const CITY_SELECTION_KEY = 'phone_gen_selected_cities';
+
+  function getCitySelection() {
+    try {
+      return JSON.parse(localStorage.getItem(CITY_SELECTION_KEY) || '[]');
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function saveCitySelection(cities) {
+    try {
+      localStorage.setItem(CITY_SELECTION_KEY, JSON.stringify(cities));
+    } catch (e) {
+      console.warn('[localStorage] saveCitySelection 失败:', e);
+    }
+  }
+
+  function clearCitySelection() {
+    try {
+      localStorage.removeItem(CITY_SELECTION_KEY);
+    } catch (e) {
+      console.warn('[localStorage] clearCitySelection 失败:', e);
+    }
+  }
+
   // ---------- 省份生成计数（localStorage）----------
   const PROV_HISTORY_KEY = 'phone_gen_by_province';
 
@@ -760,6 +793,16 @@
     updateProvStats();
     showToast('省份历史已清除');
   }
+
+  function clearCitySelectionAndUpdate() {
+    clearCitySelection();
+    // Deselect all city tags in the DOM
+    document.querySelectorAll('#cityGroup .op-tag.active').forEach(t => t.classList.remove('active'));
+    updateCityCount();
+    showToast('市区历史已清除');
+  }
+
+
 
   function getProvTotal(prov, suffixDigits) {
     const segs = segmentCounts[prov] || 0;
@@ -897,6 +940,7 @@
   }
   function clearAll() {
     document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.remove('active'));
+    clearCitySelection();
     updateProvCount();
     updateCityPanel();
   }
@@ -918,9 +962,12 @@
       return;
     }
 
-    // Collect all cities for selected provinces (preserve previously selected cities)
+    // Collect all cities for selected provinces (restore from localStorage, fall back to DOM)
+    const savedCities = getCitySelection();
     const prevSelected = new Set(
-      [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city)
+      savedCities.length > 0
+        ? savedCities
+        : [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city)
     );
 
     // Build union of cities across all selected provinces, sorted
@@ -949,6 +996,8 @@
   function toggleCity(tag) {
     tag.classList.toggle('active');
     updateCityCount();
+    const selected = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
+    saveCitySelection(selected);
   }
 
   function updateCityCount() {
