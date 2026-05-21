@@ -1442,6 +1442,16 @@
     }
   }
 
+  // ---------- 辅助：从城市列表推导所属省份 ----------
+  function getProvincesFromCities(cities) {
+    const provSet = new Set();
+    cities.forEach(city => {
+      const prov = provinceByCity[city];
+      if (prov) provSet.add(prov);
+    });
+    return [...provSet];
+  }
+
   // ---------- 生成 ----------
   async function generate() {
     const provinces = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
@@ -1509,6 +1519,8 @@
       if (finalResults.length > 0) {
         if (cities.length > 0) {
           addToCityHistory(cities, finalResults.length);
+          const provinceList = getProvincesFromCities(cities);
+          addToProvHistory(provinceList, finalResults.length);
         } else if (provinces.length > 0) {
           addToProvHistory(provinces, finalResults.length);
         }
@@ -1597,6 +1609,8 @@
       if (total_count > 0) {
         if (cities.length > 0) {
           addToCityHistory(cities, total_count);
+          const provinceList = getProvincesFromCities(cities);
+          addToProvHistory(provinceList, total_count);
         } else if (provinces.length > 0) {
           addToProvHistory(provinces, total_count);
         }
