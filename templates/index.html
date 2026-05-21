@@ -746,6 +746,12 @@
   <h4>所有 localStorage 键（含大小）</h4>
   <div class="debug-section" id="dbgAllKeys">—</div>
 
+  <h4>后端用户偏好（DB）</h4>
+  <div class="debug-section">
+    <div id="dbgPrefSummary" style="color:#cba6f7;">点击「查询 DB 偏好」加载数据</div>
+    <div id="dbgPrefResult" style="margin-top:8px;max-height:200px;overflow-y:auto;white-space:pre-wrap;background:#181825;border-radius:6px;padding:10px 14px;font-size:.78rem;color:#a6e3a1;display:none;"></div>
+  </div>
+
   <h4>后端 issued_numbers 表</h4>
   <div class="debug-section">
     <div id="dbgIssuedSummary" style="color:#cba6f7;">点击「查询 issued_numbers」加载数据</div>
@@ -754,6 +760,7 @@
 
   <div class="debug-actions">
     <button onclick="refreshDebugPanel()">🔄 刷新 localStorage 信息</button>
+    <button onclick="queryDBPreferences()">☁️ 查询 DB 偏好</button>
     <button onclick="queryIssuedNumbers()">🗄 查询 issued_numbers</button>
     <button onclick="exportLocalStorageJSON()">📤 导出 localStorage JSON</button>
   </div>
@@ -817,6 +824,53 @@
     }
   }
 
+
+  // ---------- 后端偏好同步（DB persistence）----------
+  // Debounce timer handle — we batch rapid successive changes into a single
+  // POST so we don't hammer the DB on every click.
+  let _prefSaveTimer = null;
+  const PREF_DEBOUNCE_MS = 2000;
+
+  /**
+   * Collect the current in-memory preference state and POST it to the backend.
+   * Called directly (no debounce) when we need an immediate flush, e.g. on
+   * clear operations.
+   */
+  async function flushPreferencesToDB() {
+    try {
+      const payload = {
+        prov_selection: getProvSelection(),
+        city_selection: getCitySelection(),
+        prov_history:   getProvHistory(),
+        city_history:   getCityHistory(),
+      };
+      const res = await fetch('/api/user/preferences', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        console.warn('[DB sync] 保存偏好失败:', data.error || res.status);
+      } else {
+        console.log('[DB sync] 偏好已同步到数据库');
+      }
+    } catch (e) {
+      console.warn('[DB sync] 网络错误，偏好未能同步:', e && e.message || e);
+    }
+  }
+
+  /**
+   * Schedule a debounced save to the DB.  Multiple calls within
+   * PREF_DEBOUNCE_MS will be collapsed into a single flush.
+   */
+  function schedulePrefSave() {
+    if (_prefSaveTimer !== null) clearTimeout(_prefSaveTimer);
+    _prefSaveTimer = setTimeout(() => {
+      _prefSaveTimer = null;
+      flushPreferencesToDB();
+    }, PREF_DEBOUNCE_MS);
+  }
 
   // ---------- 本地历史（per-user localStorage 去重）----------
   const LOCAL_HISTORY_KEY = 'phone_gen_local_history';
@@ -885,17 +939,17 @@
       if (!localStorageAvailable) {
         console.warn('[saveCitySelection] localStorage 不可用，跳过保存');
         showToast('⚠️ 本地存储不可用，市区选择无法保存');
-        return;
-      }
-      const serialized = JSON.stringify(cities);
-      localStorage.setItem(CITY_SELECTION_KEY, serialized);
-      // Verify the write succeeded by reading back
-      const readBack = localStorage.getItem(CITY_SELECTION_KEY);
-      if (readBack !== serialized) {
-        console.error('[saveCitySelection] 写入验证失败: 写入=' + serialized + ' 读回=' + readBack);
-        showToast('⚠️ 市区选择保存验证失败，请检查浏览器存储设置');
       } else {
-        console.log('[saveCitySelection] 写入验证成功，已保存 ' + cities.length + ' 个市区');
+        const serialized = JSON.stringify(cities);
+        localStorage.setItem(CITY_SELECTION_KEY, serialized);
+        // Verify the write succeeded by reading back
+        const readBack = localStorage.getItem(CITY_SELECTION_KEY);
+        if (readBack !== serialized) {
+          console.error('[saveCitySelection] 写入验证失败: 写入=' + serialized + ' 读回=' + readBack);
+          showToast('⚠️ 市区选择保存验证失败，请检查浏览器存储设置');
+        } else {
+          console.log('[saveCitySelection] 写入验证成功，已保存 ' + cities.length + ' 个市区');
+        }
       }
     } catch (e) {
       console.error('[saveCitySelection] 保存失败:', e);
@@ -904,6 +958,8 @@
         : `市区选择保存失败（${e && e.name || '未知错误'}）`;
       showToast('⚠️ ' + reason);
     }
+    // Also persist to backend DB (debounced)
+    schedulePrefSave();
   }
 
   function clearCitySelection() {
@@ -935,10 +991,10 @@
     try {
       if (!localStorageAvailable) {
         console.warn('[saveProvSelection] localStorage 不可用，跳过保存');
-        return;
+      } else {
+        localStorage.setItem(PROV_SELECTION_KEY, JSON.stringify(provinces));
+        console.log('[saveProvSelection] 已保存 ' + provinces.length + ' 个省份');
       }
-      localStorage.setItem(PROV_SELECTION_KEY, JSON.stringify(provinces));
-      console.log('[saveProvSelection] 已保存 ' + provinces.length + ' 个省份');
     } catch (e) {
       console.error('[saveProvSelection] 保存失败:', e);
       const reason = e && e.name === 'QuotaExceededError'
@@ -946,6 +1002,8 @@
         : `省份选择保存失败（${e && e.name || '未知错误'}）`;
       showToast('⚠️ ' + reason);
     }
+    // Also persist to backend DB (debounced)
+    schedulePrefSave();
   }
 
   function clearProvSelection() {
@@ -959,6 +1017,7 @@
 
   function clearProvSelectionAndUpdate() {
     clearProvSelection();
+    schedulePrefSave();
     showToast('省份选择已清除');
   }
 
@@ -991,6 +1050,8 @@
       console.warn('[localStorage] addToCityHistory 失败:', e);
     }
     updateCityStats();
+    // Also persist to backend DB (debounced)
+    schedulePrefSave();
   }
 
   function clearCityHistory() {
@@ -1001,6 +1062,7 @@
       return;
     }
     updateCityStats();
+    schedulePrefSave();
     showToast('市区历史已清除');
   }
 
@@ -1065,6 +1127,8 @@
       console.warn('[localStorage] addToProvHistory 失败:', e);
     }
     updateProvStats();
+    // Also persist to backend DB (debounced)
+    schedulePrefSave();
   }
 
   function clearProvHistory() {
@@ -1075,6 +1139,7 @@
       return;
     }
     updateProvStats();
+    schedulePrefSave();
     showToast('省份历史已清除');
   }
 
@@ -1083,6 +1148,7 @@
     // Deselect all city tags in the DOM
     document.querySelectorAll('#cityGroup .op-tag.active').forEach(t => t.classList.remove('active'));
     updateCityCount();
+    schedulePrefSave();
     showToast('市区选择已清除');
   }
 
@@ -1175,17 +1241,43 @@
       });
       console.log('[initApp] 构建 provinceByCity，共', Object.keys(provinceByCity).length, '个城市');
 
+      // ---- Restore preferences: DB takes priority over localStorage ----
+      // The /api/config response already includes the user's saved preferences
+      // so we don't need an extra round-trip.
+      // applyLocalStorageStatus() is called later in initApp, so check
+      // availability directly here before we try to write.
+      const lsAvailableNow = checkLocalStorage();
+      const dbPrefs = cfg.user_preferences || { exists: false };
+      if (dbPrefs.exists) {
+        console.log('[initApp] 从数据库恢复偏好 (updated_at=' + dbPrefs.updated_at + ')');
+        // Sync DB data into localStorage so existing read helpers work
+        try {
+          if (lsAvailableNow) {
+            localStorage.setItem(PROV_SELECTION_KEY, JSON.stringify(dbPrefs.prov_selection || []));
+            localStorage.setItem(CITY_SELECTION_KEY, JSON.stringify(dbPrefs.city_selection || []));
+            localStorage.setItem(PROV_HISTORY_KEY,   JSON.stringify(dbPrefs.prov_history   || {}));
+            localStorage.setItem(CITY_HISTORY_KEY,   JSON.stringify(dbPrefs.city_history   || {}));
+            console.log('[initApp] DB 偏好已同步到 localStorage');
+          }
+        } catch (e) {
+          console.warn('[initApp] 同步 DB 偏好到 localStorage 失败:', e);
+        }
+      } else {
+        console.log('[initApp] 数据库无已保存偏好，使用 localStorage 数据');
+      }
+
       // Populate province grid
       const grid = document.getElementById('provGrid');
       grid.innerHTML = cfg.provinces.map(p =>
         `<button class="prov-btn" data-prov="${p}" onclick="toggleProv(this)"><span class="prov-name">${p}</span><span class="prov-stat"></span></button>`
       ).join('');
 
-      // Restore previously selected provinces from localStorage
+      // Restore previously selected provinces (from localStorage, which was
+      // already synced from DB above if DB data existed)
       const savedProvs = getProvSelection();
       const savedProvSet = new Set(savedProvs);
       if (savedProvs.length > 0) {
-        console.log('[initApp] 从 localStorage 恢复省份选择 (' + savedProvs.length + '):', savedProvs);
+        console.log('[initApp] 恢复省份选择 (' + savedProvs.length + '):', savedProvs);
         document.querySelectorAll('#provGrid .prov-btn').forEach(btn => {
           if (savedProvSet.has(btn.dataset.prov)) {
             btn.classList.add('active');
@@ -1843,6 +1935,41 @@
     }
 
     console.log('[refreshDebugPanel] localStorage 状态已刷新');
+  }
+
+  async function queryDBPreferences() {
+    const summaryEl = document.getElementById('dbgPrefSummary');
+    const resultEl  = document.getElementById('dbgPrefResult');
+    summaryEl.textContent = '⏳ 查询中…';
+    resultEl.style.display = 'none';
+    resultEl.textContent = '';
+    try {
+      const res  = await fetch('/api/user/preferences');
+      const data = await res.json();
+      if (!res.ok) {
+        summaryEl.textContent = '❌ 查询失败: ' + (data.error || res.status);
+        return;
+      }
+      if (!data.exists) {
+        summaryEl.textContent = '（数据库中无已保存偏好）';
+        return;
+      }
+      summaryEl.innerHTML =
+        `已保存偏好  |  更新时间: <strong style="color:#a6e3a1">${data.updated_at}</strong>`;
+      const lines = [];
+      lines.push('prov_selection (' + (data.prov_selection || []).length + '): ' +
+        JSON.stringify(data.prov_selection));
+      lines.push('city_selection (' + (data.city_selection || []).length + '): ' +
+        JSON.stringify(data.city_selection));
+      lines.push('prov_history keys (' + Object.keys(data.prov_history || {}).length + '): ' +
+        JSON.stringify(data.prov_history));
+      lines.push('city_history keys (' + Object.keys(data.city_history || {}).length + '): ' +
+        JSON.stringify(data.city_history));
+      resultEl.textContent = lines.join('\n');
+      resultEl.style.display = 'block';
+    } catch (e) {
+      summaryEl.textContent = '❌ 请求失败: ' + (e && e.message || e);
+    }
   }
 
   async function queryIssuedNumbers() {
