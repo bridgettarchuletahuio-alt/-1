@@ -582,9 +582,11 @@
         <button onclick="selectAll()">全选</button>
         <button onclick="clearAll()">清空</button>
         <button id="clearProvHistoryBtn" onclick="clearProvHistory()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除各省份已生成计数">清除省份历史</button>
+        <button id="clearProvSelectionBtn" onclick="clearProvSelectionAndUpdate()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除已保存的省份选择">清除省份选择</button>
         <button id="clearCitySelectionBtn" onclick="clearCitySelectionAndUpdate()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除已保存的市区选择">清除市区选择</button>
         <button id="clearCityHistoryBtn" onclick="clearCityHistory()" style="color:#ff4d4f;border-color:#ff4d4f;" title="清除各市区已生成计数">清除市区历史</button>
       </div>
+
     </div>
 
 
@@ -720,6 +722,10 @@
   <h4>localStorage 内容</h4>
   <div class="debug-section">
     <div class="debug-kv">
+      <span class="dk">PROV_SELECTION_KEY</span>
+      <span class="dv" id="dbgProvSelection">—</span>
+    </div>
+    <div class="debug-kv">
       <span class="dk">CITY_SELECTION_KEY</span>
       <span class="dv" id="dbgCitySelection">—</span>
     </div>
@@ -753,21 +759,15 @@
   </div>
 </div>
 
+
 </div><!-- end #mainApp -->
 
 <div id="toast"></div>
 
 <script>
-  let resultData = [];
-  let currentBatchId = '';
-  let apiEnabled = false;
-  let availableProviders = [];
-  let segmentCounts = {};         // { province: segmentCount } — populated from /api/config
-  let citiesByProvince = {};      // { province: [city, ...] } — populated from /api/config
-  let segmentCountsByCity = {};   // { city: segmentCount } — populated from /api/config
-
   // ---------- localStorage 可用性检测 ----------
   let localStorageAvailable = false;
+
 
   function checkLocalStorage() {
     const TEST_KEY = '__ls_test__';
@@ -788,6 +788,7 @@
     const badge          = document.getElementById('lsStatusBadge');
     const clearBtn       = document.getElementById('clearLocalHistoryBtn');
     const provBtn        = document.getElementById('clearProvHistoryBtn');
+    const provSelBtn     = document.getElementById('clearProvSelectionBtn');
     const citySelBtn     = document.getElementById('clearCitySelectionBtn');
     const cityHistBtn    = document.getElementById('clearCityHistoryBtn');
 
@@ -797,6 +798,7 @@
       badge.textContent = '🟢 本地存储正常';
       if (clearBtn)    { clearBtn.disabled    = false; clearBtn.title    = ''; }
       if (provBtn)     { provBtn.disabled      = false; provBtn.title     = ''; }
+      if (provSelBtn)  { provSelBtn.disabled   = false; provSelBtn.title  = ''; }
       if (citySelBtn)  { citySelBtn.disabled   = false; citySelBtn.title  = ''; }
       if (cityHistBtn) { cityHistBtn.disabled  = false; cityHistBtn.title = ''; }
     } else {
@@ -805,6 +807,7 @@
       badge.textContent = '🔴 本地存储不可用';
       if (clearBtn)    { clearBtn.disabled    = true; clearBtn.title    = '本地存储不可用'; }
       if (provBtn)     { provBtn.disabled      = true; provBtn.title     = '本地存储不可用'; }
+      if (provSelBtn)  { provSelBtn.disabled   = true; provSelBtn.title  = '本地存储不可用'; }
       if (citySelBtn)  { citySelBtn.disabled   = true; citySelBtn.title  = '本地存储不可用'; }
       if (cityHistBtn) { cityHistBtn.disabled  = true; cityHistBtn.title = '本地存储不可用'; }
     }
@@ -906,6 +909,53 @@
     } catch (e) {
       console.warn('[clearCitySelection] 清除失败:', e);
     }
+  }
+
+  // ---------- 省份选择持久化（localStorage）----------
+  const PROV_SELECTION_KEY = 'phone_gen_selected_provinces';
+
+  function getProvSelection() {
+    try {
+      const raw = localStorage.getItem(PROV_SELECTION_KEY);
+      const parsed = JSON.parse(raw || '[]');
+      console.log('[getProvSelection] key=' + PROV_SELECTION_KEY + ' raw=' + raw + ' parsed=', parsed);
+      return parsed;
+    } catch (e) {
+      console.warn('[getProvSelection] 解析失败:', e);
+      return [];
+    }
+  }
+
+  function saveProvSelection(provinces) {
+    console.log('[saveProvSelection] 保存省份选择:', provinces);
+    try {
+      if (!localStorageAvailable) {
+        console.warn('[saveProvSelection] localStorage 不可用，跳过保存');
+        return;
+      }
+      localStorage.setItem(PROV_SELECTION_KEY, JSON.stringify(provinces));
+      console.log('[saveProvSelection] 已保存 ' + provinces.length + ' 个省份');
+    } catch (e) {
+      console.error('[saveProvSelection] 保存失败:', e);
+      const reason = e && e.name === 'QuotaExceededError'
+        ? '本地存储空间已满，省份选择未能保存'
+        : `省份选择保存失败（${e && e.name || '未知错误'}）`;
+      showToast('⚠️ ' + reason);
+    }
+  }
+
+  function clearProvSelection() {
+    try {
+      localStorage.removeItem(PROV_SELECTION_KEY);
+      console.log('[clearProvSelection] 已清除省份选择');
+    } catch (e) {
+      console.warn('[clearProvSelection] 清除失败:', e);
+    }
+  }
+
+  function clearProvSelectionAndUpdate() {
+    clearProvSelection();
+    showToast('省份选择已清除');
   }
 
   // ---------- 市区生成计数（localStorage）----------
@@ -1120,6 +1170,20 @@
         `<button class="prov-btn" data-prov="${p}" onclick="toggleProv(this)"><span class="prov-name">${p}</span><span class="prov-stat"></span></button>`
       ).join('');
 
+      // Restore previously selected provinces from localStorage
+      const savedProvs = getProvSelection();
+      if (savedProvs.length > 0) {
+        console.log('[initApp] 从 localStorage 恢复省份选择 (' + savedProvs.length + '):', savedProvs);
+        const savedProvSet = new Set(savedProvs);
+        document.querySelectorAll('#provGrid .prov-btn').forEach(btn => {
+          if (savedProvSet.has(btn.dataset.prov)) {
+            btn.classList.add('active');
+          }
+        });
+        updateProvCount();
+        updateCityPanel();
+      }
+
       // Populate operator tags
       const opGroup = document.getElementById('opGroup');
       opGroup.innerHTML = cfg.operators.map(op =>
@@ -1164,14 +1228,19 @@
     btn.classList.toggle('active');
     updateProvCount();
     updateCityPanel();
+    const selected = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
+    saveProvSelection(selected);
   }
   function selectAll() {
     document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.add('active'));
     updateProvCount();
     updateCityPanel();
+    const selected = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
+    saveProvSelection(selected);
   }
   function clearAll() {
     document.querySelectorAll('#provGrid .prov-btn').forEach(b => b.classList.remove('active'));
+    clearProvSelection();
     clearCitySelection();
     updateProvCount();
     updateCityPanel();
@@ -1643,6 +1712,7 @@
     document.getElementById('dbgLsKeyCount').textContent = keyCount >= 0 ? keyCount + ' 个' : '(读取失败)';
 
     // Known keys
+    document.getElementById('dbgProvSelection').textContent = lsValueSummary(PROV_SELECTION_KEY);
     document.getElementById('dbgCitySelection').textContent = lsValueSummary(CITY_SELECTION_KEY);
     document.getElementById('dbgCityHistory').textContent   = lsValueSummary(CITY_HISTORY_KEY);
     document.getElementById('dbgProvHistory').textContent   = lsValueSummary(PROV_HISTORY_KEY);
