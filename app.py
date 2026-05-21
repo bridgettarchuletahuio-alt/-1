@@ -489,8 +489,40 @@ def api_generate():
             })
 
         logger.info(
-            "[generate] batch=%s generated=%d global_dedup_hits=%d",
-            batch_id, len(results), global_dedup_hits,
+            "[generate] batch=%s generated=%d global_dedup_hits=%d seen_set_size=%d",
+            batch_id, len(results), global_dedup_hits, len(seen),
+        )
+
+        # Post-generation dedup verification: catch any duplicates that slipped
+        # through (e.g. race conditions between concurrent requests where
+        # INSERT OR IGNORE would silently drop the row but the number was
+        # already appended to results).
+        pre_dedup_count = len(results)
+        seen_phones: set[str] = set()
+        deduped_results: list[dict] = []
+        for r in results:
+            if r["phone"] not in seen_phones:
+                seen_phones.add(r["phone"])
+                deduped_results.append(r)
+        if len(deduped_results) != pre_dedup_count:
+            duplicate_phones = [
+                r["phone"] for r in results if results.count(r) > 1
+            ]
+            logger.warning(
+                "[generate] batch=%s DUPLICATES FOUND in results: pre_dedup=%d "
+                "post_dedup=%d duplicate_phones=%s",
+                batch_id, pre_dedup_count, len(deduped_results), duplicate_phones,
+            )
+            results = deduped_results
+        else:
+            logger.info(
+                "[generate] batch=%s no duplicates found in results (count=%d)",
+                batch_id, len(results),
+            )
+
+        logger.info(
+            "[generate] batch=%s final results count=%d",
+            batch_id, len(results),
         )
 
         # Persist batch metadata, issued numbers, and batch-number mapping
@@ -736,8 +768,43 @@ def api_generate_bulk_export():
                     results.append(row)
 
                 logger.info(
-                    "[bulk-export] batch=%s generated=%d global_dedup_hits=%d",
+                    "[bulk-export] batch=%s generated=%d global_dedup_hits=%d "
+                    "seen_batch_size=%d global_seen_size=%d",
                     batch_id, len(results), global_dedup_hits,
+                    len(seen_batch), len(global_seen),
+                )
+
+                # Post-generation dedup verification: catch any duplicates that
+                # slipped through (e.g. race conditions between concurrent
+                # requests where INSERT OR IGNORE would silently drop the row
+                # but the number was already appended to results).
+                pre_dedup_count = len(results)
+                seen_phones_batch: set[str] = set()
+                deduped_results: list[dict] = []
+                for r in results:
+                    if r["phone"] not in seen_phones_batch:
+                        seen_phones_batch.add(r["phone"])
+                        deduped_results.append(r)
+                if len(deduped_results) != pre_dedup_count:
+                    duplicate_phones = [
+                        r["phone"] for r in results if results.count(r) > 1
+                    ]
+                    logger.warning(
+                        "[bulk-export] batch=%s DUPLICATES FOUND in results: "
+                        "pre_dedup=%d post_dedup=%d duplicate_phones=%s",
+                        batch_id, pre_dedup_count, len(deduped_results),
+                        duplicate_phones,
+                    )
+                    results = deduped_results
+                else:
+                    logger.info(
+                        "[bulk-export] batch=%s no duplicates found in results (count=%d)",
+                        batch_id, len(results),
+                    )
+
+                logger.info(
+                    "[bulk-export] batch=%s final results count=%d",
+                    batch_id, len(results),
                 )
 
                 try:
