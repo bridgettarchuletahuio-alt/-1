@@ -768,6 +768,10 @@
   // ---------- localStorage 可用性检测 ----------
   let localStorageAvailable = false;
 
+  // ---------- 全局数据 ----------
+  // 城市→省份反向映射，在 initApp() 中构建
+  let provinceByCity = {};
+
 
   function checkLocalStorage() {
     const TEST_KEY = '__ls_test__';
@@ -1164,6 +1168,13 @@
       citiesByProvince = cfg.cities_by_province || {};
       segmentCountsByCity = cfg.segment_counts_by_city || {};
 
+      // Build reverse mapping: city → province
+      provinceByCity = {};
+      Object.entries(citiesByProvince).forEach(([prov, cities]) => {
+        cities.forEach(city => { provinceByCity[city] = prov; });
+      });
+      console.log('[initApp] 构建 provinceByCity，共', Object.keys(provinceByCity).length, '个城市');
+
       // Populate province grid
       const grid = document.getElementById('provGrid');
       grid.innerHTML = cfg.provinces.map(p =>
@@ -1172,14 +1183,41 @@
 
       // Restore previously selected provinces from localStorage
       const savedProvs = getProvSelection();
+      const savedProvSet = new Set(savedProvs);
       if (savedProvs.length > 0) {
         console.log('[initApp] 从 localStorage 恢复省份选择 (' + savedProvs.length + '):', savedProvs);
-        const savedProvSet = new Set(savedProvs);
         document.querySelectorAll('#provGrid .prov-btn').forEach(btn => {
           if (savedProvSet.has(btn.dataset.prov)) {
             btn.classList.add('active');
           }
         });
+      }
+
+      // Sync provinces from saved city selections (in case cities were saved without their provinces)
+      const savedCities = getCitySelection();
+      if (savedCities.length > 0) {
+        console.log('[initApp] 检查已保存市区对应的省份同步 (' + savedCities.length + '):', savedCities);
+        let provSyncNeeded = false;
+        savedCities.forEach(city => {
+          const prov = provinceByCity[city];
+          if (prov && !savedProvSet.has(prov)) {
+            savedProvSet.add(prov);
+            provSyncNeeded = true;
+            console.log('[initApp] 自动补选省份:', prov, '（因已选城市:', city, '）');
+          }
+        });
+        if (provSyncNeeded) {
+          document.querySelectorAll('#provGrid .prov-btn').forEach(btn => {
+            if (savedProvSet.has(btn.dataset.prov)) {
+              btn.classList.add('active');
+            }
+          });
+          saveProvSelection([...savedProvSet]);
+          console.log('[initApp] 省份同步完成，已保存更新后的省份选择');
+        }
+      }
+
+      if (savedProvSet.size > 0) {
         updateProvCount();
         updateCityPanel();
       }
@@ -1298,6 +1336,29 @@
       return `<span class="op-tag${active}" data-city="${c}" onclick="toggleCity(this)">${c}</span>`;
     }).join('');
 
+    // Sync province buttons for any restored city selections
+    if (prevSelected.size > 0) {
+      const provincesToActivate = new Set();
+      prevSelected.forEach(city => {
+        const prov = provinceByCity[city];
+        if (prov) provincesToActivate.add(prov);
+      });
+      if (provincesToActivate.size > 0) {
+        let changed = false;
+        document.querySelectorAll('#provGrid .prov-btn').forEach(btn => {
+          if (provincesToActivate.has(btn.dataset.prov) && !btn.classList.contains('active')) {
+            btn.classList.add('active');
+            changed = true;
+            console.log('[updateCityPanel] 自动补选省份:', btn.dataset.prov);
+          }
+        });
+        if (changed) {
+          updateProvCount();
+          saveProvSelection([...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov));
+        }
+      }
+    }
+
     cityCard.style.display = '';
     updateCityCount();
     updateCityStats();
@@ -1309,10 +1370,38 @@
     tag.classList.toggle('active');
     const nowActive = tag.classList.contains('active');
     console.log('[toggleCity] city=' + city + ' ' + (wasActive ? 'deselected' : 'selected'));
+
+    // Sync parent province selection
+    const prov = provinceByCity[city];
+    if (prov) {
+      const provBtn = document.querySelector(`#provGrid .prov-btn[data-prov="${prov}"]`);
+      if (provBtn) {
+        if (nowActive) {
+          // City selected → ensure its province is selected
+          if (!provBtn.classList.contains('active')) {
+            provBtn.classList.add('active');
+            console.log('[toggleCity] 自动选中省份:', prov);
+            updateProvCount();
+          }
+        } else {
+          // City deselected → deselect province only if no other cities from it remain selected
+          const siblingsSelected = [...document.querySelectorAll('#cityGroup .op-tag.active')]
+            .some(t => provinceByCity[t.dataset.city] === prov);
+          if (!siblingsSelected && provBtn.classList.contains('active')) {
+            provBtn.classList.remove('active');
+            console.log('[toggleCity] 自动取消省份:', prov, '（该省无其他已选城市）');
+            updateProvCount();
+          }
+        }
+      }
+    }
+
     updateCityCount();
-    const selected = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
-    console.log('[toggleCity] 当前已选市区 (' + selected.length + '):', selected);
-    saveCitySelection(selected);
+    const selectedCities = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
+    const selectedProvs = [...document.querySelectorAll('#provGrid .prov-btn.active')].map(b => b.dataset.prov);
+    console.log('[toggleCity] 当前已选市区 (' + selectedCities.length + '):', selectedCities);
+    saveCitySelection(selectedCities);
+    saveProvSelection(selectedProvs);
   }
 
   function updateCityCount() {
