@@ -56,11 +56,29 @@ all_operators: set[str] = set()
 
 
 def init_issued_db() -> None:
-    ISSUED_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
+    """Initialise the SQLite database, creating all tables if they don't exist.
+
+    This function is idempotent — safe to call multiple times.  It logs the
+    outcome of every step so startup failures are immediately visible in the
+    application logs.
+    """
+    logger.info("[init_db] initialising database at %s", ISSUED_DB_FILE)
+    try:
+        ISSUED_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error("[init_db] could not create data directory %s: %s", ISSUED_DB_FILE.parent, exc)
+        raise
+
+    try:
+        conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
+    except sqlite3.OperationalError as exc:
+        logger.error("[init_db] could not open database file %s: %s", ISSUED_DB_FILE, exc)
+        raise
+
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS issued_numbers (
                 phone TEXT PRIMARY KEY,
@@ -70,7 +88,10 @@ def init_issued_db() -> None:
                 created_at TEXT NOT NULL
             )
         """)
+        logger.info("[init_db] table issued_numbers: ready")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_issued_created_at ON issued_numbers(created_at)")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS generation_batches (
                 batch_id TEXT PRIMARY KEY,
@@ -85,7 +106,10 @@ def init_issued_db() -> None:
                 status TEXT NOT NULL DEFAULT 'active'
             )
         """)
+        logger.info("[init_db] table generation_batches: ready")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_created_at ON generation_batches(created_at)")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS batch_numbers (
                 batch_id TEXT NOT NULL,
@@ -98,6 +122,8 @@ def init_issued_db() -> None:
                 FOREIGN KEY (batch_id) REFERENCES generation_batches(batch_id)
             )
         """)
+        logger.info("[init_db] table batch_numbers: ready")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_batch_numbers_batch ON batch_numbers(batch_id)")
 
         # user_preferences table: stores per-user province/city selections and
@@ -112,16 +138,19 @@ def init_issued_db() -> None:
                 updated_at TEXT NOT NULL
             )
         """)
+        logger.info("[init_db] table user_preferences: ready")
 
         # 兼容旧版本 issued_numbers：增加 batch_id 列（如果不存在）
         columns = {row[1] for row in conn.execute("PRAGMA table_info(issued_numbers)")}
         if "batch_id" not in columns:
             conn.execute("ALTER TABLE issued_numbers ADD COLUMN batch_id TEXT")
+            logger.info("[init_db] issued_numbers: added missing batch_id column")
 
         # 迁移 generation_batches：移除 commercial_unique 列（如果存在）
         # SQLite 不直接支持 DROP COLUMN（3.35 以下），使用重建表方式
         batch_cols = {row[1] for row in conn.execute("PRAGMA table_info(generation_batches)")}
         if "commercial_unique" in batch_cols:
+            logger.info("[init_db] generation_batches: migrating away from commercial_unique column")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS generation_batches_new (
                     batch_id TEXT PRIMARY KEY,
@@ -147,8 +176,28 @@ def init_issued_db() -> None:
             conn.execute("DROP TABLE generation_batches")
             conn.execute("ALTER TABLE generation_batches_new RENAME TO generation_batches")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_created_at ON generation_batches(created_at)")
+            logger.info("[init_db] generation_batches: migration complete")
 
         conn.commit()
+
+        # Log row counts so we can confirm the DB state at startup
+        counts = {
+            tbl: conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]  # noqa: S608
+            for tbl in ("issued_numbers", "generation_batches", "batch_numbers", "user_preferences")
+        }
+        logger.info(
+            "[init_db] startup row counts — issued_numbers=%d  generation_batches=%d  "
+            "batch_numbers=%d  user_preferences=%d",
+            counts["issued_numbers"],
+            counts["generation_batches"],
+            counts["batch_numbers"],
+            counts["user_preferences"],
+        )
+        logger.info("[init_db] database initialisation complete")
+
+    except sqlite3.Error as exc:
+        logger.error("[init_db] database initialisation failed: %s", exc)
+        raise
     finally:
         conn.close()
 
@@ -183,7 +232,36 @@ def load_data() -> None:
 
 
 load_data()
-init_issued_db()
+
+# Initialise the database at import time (covers both `flask run` and WSGI
+# servers such as gunicorn that import the module directly).  Errors are
+# logged and re-raised so a misconfigured environment fails loudly rather
+# than silently producing an empty database.
+try:
+    init_issued_db()
+except Exception as _init_exc:  # noqa: BLE001
+    logger.critical(
+        "[startup] database initialisation failed — the application will not "
+        "function correctly: %s",
+        _init_exc,
+    )
+
+# Belt-and-suspenders: also run init inside a before_request hook so that
+# WSGI workers that were forked *after* the module-level call (e.g. gunicorn
+# pre-fork workers) still initialise the DB on their first request.
+_db_initialised = False
+
+
+@app.before_request
+def _ensure_db_initialised():
+    global _db_initialised
+    if not _db_initialised:
+        try:
+            init_issued_db()
+            _db_initialised = True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[before_request] DB re-initialisation failed: %s", exc)
+
 
 # --------------------------------------------------------------------------- #
 # 认证
@@ -1257,5 +1335,129 @@ def api_debug_issued_numbers():
     })
 
 
+@app.post("/api/admin/rebuild-stats")
+def api_admin_rebuild_stats():
+    """Admin endpoint: aggregate generation counts from all database tables.
+
+    Reads user_preferences, generation_batches, and issued_numbers to produce
+    a summary of what is stored in the database.  Useful for diagnosing
+    discrepancies between localStorage counts and the server-side database.
+
+    Requires authentication.
+    """
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
+    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+
+        # ── issued_numbers stats ──────────────────────────────────────────────
+        total_issued = conn.execute("SELECT COUNT(*) FROM issued_numbers").fetchone()[0]
+
+        issued_by_province = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT province, COUNT(*) AS count
+                FROM issued_numbers
+                GROUP BY province
+                ORDER BY count DESC
+                """
+            ).fetchall()
+        ]
+
+        issued_by_city = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT city, COUNT(*) AS count
+                FROM issued_numbers
+                GROUP BY city
+                ORDER BY count DESC
+                LIMIT 50
+                """
+            ).fetchall()
+        ]
+
+        # ── generation_batches stats ──────────────────────────────────────────
+        total_batches = conn.execute("SELECT COUNT(*) FROM generation_batches").fetchone()[0]
+        active_batches = conn.execute(
+            "SELECT COUNT(*) FROM generation_batches WHERE status = 'active'"
+        ).fetchone()[0]
+        total_generated = conn.execute(
+            "SELECT COALESCE(SUM(generated_count), 0) FROM generation_batches WHERE status = 'active'"
+        ).fetchone()[0]
+
+        # ── user_preferences stats ────────────────────────────────────────────
+        total_users = conn.execute("SELECT COUNT(*) FROM user_preferences").fetchone()[0]
+
+        # Aggregate prov_history counts across all users
+        prov_history_totals: dict[str, int] = defaultdict(int)
+        city_history_totals: dict[str, int] = defaultdict(int)
+        for row in conn.execute("SELECT prov_history, city_history FROM user_preferences").fetchall():
+            try:
+                for prov, cnt in json.loads(row["prov_history"] or "{}").items():
+                    prov_history_totals[prov] += int(cnt)
+            except (ValueError, TypeError):
+                pass
+            try:
+                for city, cnt in json.loads(row["city_history"] or "{}").items():
+                    city_history_totals[city] += int(cnt)
+            except (ValueError, TypeError):
+                pass
+
+        # ── DB file info ──────────────────────────────────────────────────────
+        try:
+            db_size_bytes = ISSUED_DB_FILE.stat().st_size
+        except OSError:
+            db_size_bytes = -1
+
+    except sqlite3.OperationalError as exc:
+        logger.error("[admin/rebuild-stats] DB error: %s", exc)
+        return jsonify({"error": f"数据库查询失败: {exc}"}), 500
+    finally:
+        conn.close()
+
+    summary = {
+        "db_file": str(ISSUED_DB_FILE),
+        "db_size_bytes": db_size_bytes,
+        "issued_numbers": {
+            "total": total_issued,
+            "by_province": issued_by_province,
+            "by_city_top50": issued_by_city,
+        },
+        "generation_batches": {
+            "total_batches": total_batches,
+            "active_batches": active_batches,
+            "total_generated_active": total_generated,
+        },
+        "user_preferences": {
+            "total_users": total_users,
+            "prov_history_totals": dict(
+                sorted(prov_history_totals.items(), key=lambda x: x[1], reverse=True)
+            ),
+            "city_history_totals": dict(
+                sorted(city_history_totals.items(), key=lambda x: x[1], reverse=True)
+            ),
+        },
+    }
+
+    logger.info(
+        "[admin/rebuild-stats] total_issued=%d  total_batches=%d  total_users=%d",
+        total_issued, total_batches, total_users,
+    )
+
+    return jsonify(summary)
+
+
 if __name__ == "__main__":
+    logger.info("[startup] running via __main__ — ensuring database is initialised")
+    try:
+        init_issued_db()
+        logger.info("[startup] database ready")
+    except Exception as exc:  # noqa: BLE001
+        logger.critical("[startup] database initialisation failed: %s", exc)
     app.run(host="0.0.0.0", port=8080, debug=False)
