@@ -100,6 +100,19 @@ def init_issued_db() -> None:
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_batch_numbers_batch ON batch_numbers(batch_id)")
 
+        # user_preferences table: stores per-user province/city selections and
+        # generation history so preferences persist across browsers and devices.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id TEXT PRIMARY KEY,
+                prov_selection TEXT NOT NULL DEFAULT '[]',
+                city_selection TEXT NOT NULL DEFAULT '[]',
+                prov_history TEXT NOT NULL DEFAULT '{}',
+                city_history TEXT NOT NULL DEFAULT '{}',
+                updated_at TEXT NOT NULL
+            )
+        """)
+
         # 兼容旧版本 issued_numbers：增加 batch_id 列（如果不存在）
         columns = {row[1] for row in conn.execute("PRAGMA table_info(issued_numbers)")}
         if "batch_id" not in columns:
@@ -204,6 +217,115 @@ def api_logout():
 
 
 # --------------------------------------------------------------------------- #
+# 用户偏好（user_preferences）
+# --------------------------------------------------------------------------- #
+
+def get_user_id() -> str:
+    """Return a stable user identifier derived from the Flask session.
+
+    We use a session-scoped UUID so that the same browser session always maps
+    to the same row in user_preferences.  The value is created on first login
+    and stored in the session cookie, so it survives page reloads but is
+    intentionally reset on logout (session.clear()).
+    """
+    uid = session.get("user_id")
+    if not uid:
+        uid = str(uuid4())
+        session["user_id"] = uid
+    return uid
+
+
+@app.get("/api/user/preferences")
+def api_get_preferences():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
+    user_id = get_user_id()
+    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT prov_selection, city_selection, prov_history, city_history, updated_at "
+            "FROM user_preferences WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if row is None:
+        return jsonify({"exists": False})
+
+    return jsonify({
+        "exists": True,
+        "prov_selection": json.loads(row["prov_selection"] or "[]"),
+        "city_selection": json.loads(row["city_selection"] or "[]"),
+        "prov_history":   json.loads(row["prov_history"]   or "{}"),
+        "city_history":   json.loads(row["city_history"]   or "{}"),
+        "updated_at":     row["updated_at"],
+    })
+
+
+@app.post("/api/user/preferences")
+def api_save_preferences():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
+    body = request.get_json(silent=True) or {}
+    user_id = get_user_id()
+    now = datetime.now(timezone.utc).isoformat()
+
+    prov_selection = json.dumps(body.get("prov_selection", []),  ensure_ascii=False)
+    city_selection = json.dumps(body.get("city_selection", []),  ensure_ascii=False)
+    prov_history   = json.dumps(body.get("prov_history",   {}),  ensure_ascii=False)
+    city_history   = json.dumps(body.get("city_history",   {}),  ensure_ascii=False)
+
+    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=10)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            INSERT INTO user_preferences(user_id, prov_selection, city_selection,
+                                         prov_history, city_history, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                prov_selection = excluded.prov_selection,
+                city_selection = excluded.city_selection,
+                prov_history   = excluded.prov_history,
+                city_history   = excluded.city_history,
+                updated_at     = excluded.updated_at
+            """,
+            (user_id, prov_selection, city_selection, prov_history, city_history, now),
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        logger.error("[preferences] DB error saving preferences for user=%s: %s", user_id, exc)
+        return jsonify({"error": "数据库写入失败，请稍后重试"}), 503
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True, "updated_at": now})
+
+
+@app.delete("/api/user/preferences")
+def api_delete_preferences():
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
+    user_id = get_user_id()
+    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=10)
+    try:
+        conn.execute("DELETE FROM user_preferences WHERE user_id = ?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    return jsonify({"ok": True})
+
+
+# --------------------------------------------------------------------------- #
 # 路由
 # --------------------------------------------------------------------------- #
 
@@ -239,6 +361,33 @@ def api_config():
             if city:
                 segment_counts_by_city[city] += 1
 
+    # Fetch saved user preferences so the frontend can restore them in one
+    # round-trip instead of making a separate /api/user/preferences call.
+    user_id = get_user_id()
+    user_prefs: dict = {"exists": False}
+    try:
+        pref_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=10)
+        pref_conn.row_factory = sqlite3.Row
+        try:
+            pref_row = pref_conn.execute(
+                "SELECT prov_selection, city_selection, prov_history, city_history, updated_at "
+                "FROM user_preferences WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+        finally:
+            pref_conn.close()
+        if pref_row is not None:
+            user_prefs = {
+                "exists": True,
+                "prov_selection": json.loads(pref_row["prov_selection"] or "[]"),
+                "city_selection": json.loads(pref_row["city_selection"] or "[]"),
+                "prov_history":   json.loads(pref_row["prov_history"]   or "{}"),
+                "city_history":   json.loads(pref_row["city_history"]   or "{}"),
+                "updated_at":     pref_row["updated_at"],
+            }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[config] could not load user preferences for user=%s: %s", user_id, exc)
+
     return jsonify({
         "provinces": all_provinces,
         "operators": sorted(all_operators),
@@ -247,6 +396,7 @@ def api_config():
         "segment_counts": {prov: len(segs) for prov, segs in segments_by_province.items()},
         "cities_by_province": cities_by_province,
         "segment_counts_by_city": dict(segment_counts_by_city),
+        "user_preferences": user_prefs,
     })
 
 
