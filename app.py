@@ -56,7 +56,42 @@ all_operators: set[str] = set()
 
 
 def init_issued_db() -> None:
-    ISSUED_DB_FILE.parent.mkdir(parents=True, exist_ok=True)
+    db_dir = ISSUED_DB_FILE.parent
+
+    # ------------------------------------------------------------------ #
+    # 1. Ensure the data/ directory exists and is writable
+    # ------------------------------------------------------------------ #
+    db_dir.mkdir(parents=True, exist_ok=True)
+    dir_stat = db_dir.stat()
+    dir_mode = oct(dir_stat.st_mode)
+    logger.info("[db-init] data directory: path=%s mode=%s uid=%d gid=%d",
+                db_dir, dir_mode, dir_stat.st_uid, dir_stat.st_gid)
+
+    if not os.access(db_dir, os.W_OK):
+        raise PermissionError(
+            f"[db-init] data directory is not writable: {db_dir}"
+        )
+
+    # ------------------------------------------------------------------ #
+    # 2. Ensure the database file exists with proper permissions
+    # ------------------------------------------------------------------ #
+    if not ISSUED_DB_FILE.exists():
+        logger.info("[db-init] database file does not exist, creating: %s", ISSUED_DB_FILE)
+        ISSUED_DB_FILE.touch(mode=0o644)
+        logger.info("[db-init] database file created: %s", ISSUED_DB_FILE)
+    else:
+        logger.info("[db-init] database file already exists: %s", ISSUED_DB_FILE)
+
+    file_stat = ISSUED_DB_FILE.stat()
+    file_mode = oct(file_stat.st_mode)
+    logger.info("[db-init] database file: path=%s mode=%s size=%d bytes",
+                ISSUED_DB_FILE, file_mode, file_stat.st_size)
+
+    if not os.access(ISSUED_DB_FILE, os.R_OK | os.W_OK):
+        raise PermissionError(
+            f"[db-init] database file is not readable/writable: {ISSUED_DB_FILE}"
+        )
+
     conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
@@ -149,9 +184,44 @@ def init_issued_db() -> None:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_created_at ON generation_batches(created_at)")
 
         conn.commit()
+
+        # ------------------------------------------------------------------ #
+        # 3. Validate that tables were actually created and file is non-empty
+        # ------------------------------------------------------------------ #
+        expected_tables = {
+            "issued_numbers",
+            "generation_batches",
+            "batch_numbers",
+            "user_preferences",
+        }
+        existing_tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        missing_tables = expected_tables - existing_tables
+        if missing_tables:
+            raise RuntimeError(
+                f"[db-init] database initialization incomplete — "
+                f"missing tables: {missing_tables}"
+            )
+        logger.info("[db-init] all expected tables present: %s", sorted(expected_tables))
+
     finally:
         conn.close()
 
+    # Check file size after closing the connection (WAL checkpoint may flush here)
+    post_init_size = ISSUED_DB_FILE.stat().st_size
+    logger.info("[db-init] database file size after init: %d bytes", post_init_size)
+    if post_init_size == 0:
+        raise RuntimeError(
+            f"[db-init] database file is still 0 bytes after initialization: "
+            f"{ISSUED_DB_FILE}. Check filesystem permissions and available disk space."
+        )
+
+    logger.info("[db-init] database initialized successfully: %s (%d bytes)",
+                ISSUED_DB_FILE, post_init_size)
 
 
 def load_data() -> None:
@@ -1255,6 +1325,93 @@ def api_debug_issued_numbers():
         "by_city": by_city,
         "recent_100": recent,
     })
+
+
+@app.get("/api/health/db")
+def api_health_db():
+    """Database health check endpoint.
+
+    Returns the status of the SQLite database file and its tables so that
+    operators can quickly verify persistence is working correctly without
+    needing shell access.
+    """
+    status = "ok"
+    issues: list[str] = []
+
+    # ------------------------------------------------------------------ #
+    # File-level checks
+    # ------------------------------------------------------------------ #
+    file_exists = ISSUED_DB_FILE.exists()
+    file_size_bytes: int = -1
+    file_readable = False
+    file_writable = False
+
+    if file_exists:
+        try:
+            file_size_bytes = ISSUED_DB_FILE.stat().st_size
+        except OSError as exc:
+            issues.append(f"stat failed: {exc}")
+            status = "error"
+
+        file_readable = os.access(ISSUED_DB_FILE, os.R_OK)
+        file_writable = os.access(ISSUED_DB_FILE, os.W_OK)
+
+        if not file_readable:
+            issues.append("database file is not readable")
+            status = "error"
+        if not file_writable:
+            issues.append("database file is not writable")
+            status = "error"
+        if file_size_bytes == 0:
+            issues.append("database file is 0 bytes — initialization may have failed")
+            status = "error"
+    else:
+        issues.append("database file does not exist")
+        status = "error"
+
+    # ------------------------------------------------------------------ #
+    # Table-level checks (only if file looks usable)
+    # ------------------------------------------------------------------ #
+    tables_found: list[str] = []
+    tables_missing: list[str] = []
+    expected_tables = [
+        "issued_numbers",
+        "generation_batches",
+        "batch_numbers",
+        "user_preferences",
+    ]
+
+    if file_exists and file_readable and file_size_bytes > 0:
+        try:
+            conn = sqlite3.connect(ISSUED_DB_FILE, timeout=5)
+            try:
+                rows = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+                tables_found = sorted(row[0] for row in rows)
+            finally:
+                conn.close()
+
+            tables_missing = [t for t in expected_tables if t not in tables_found]
+            if tables_missing:
+                issues.append(f"missing tables: {tables_missing}")
+                status = "error"
+        except sqlite3.OperationalError as exc:
+            issues.append(f"database query failed: {exc}")
+            status = "error"
+
+    http_status = 200 if status == "ok" else 503
+    return jsonify({
+        "status": status,
+        "issues": issues,
+        "db_file": str(ISSUED_DB_FILE),
+        "file_exists": file_exists,
+        "file_size_bytes": file_size_bytes,
+        "file_readable": file_readable,
+        "file_writable": file_writable,
+        "tables_found": tables_found,
+        "tables_missing": tables_missing,
+    }), http_status
 
 
 if __name__ == "__main__":
