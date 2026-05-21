@@ -687,7 +687,7 @@
       <span id="localHistoryText">本地历史：0 条</span>
       <div style="display:flex;align-items:center;gap:8px;">
         <span id="lsStatusBadge" class="ls-status ok">🟢 本地存储正常</span>
-        <button class="btn-sm danger" id="clearLocalHistoryBtn" onclick="clearLocalHistory()">清除本地历史</button>
+        <button class="btn-sm" id="clearLocalHistoryBtn" onclick="clearLocalHistory()" disabled title="数据库初始化后才能清除本地历史" style="opacity:.45;cursor:not-allowed;border-color:#d1d5db;color:#9ca3af;">清除本地历史</button>
       </div>
     </div>
 
@@ -706,6 +706,12 @@
 <!-- ===== 调试面板 ===== -->
 <div id="debugPanel">
   <h3>🔍 调试信息</h3>
+
+  <div id="dbgLocalHistoryWarning" class="debug-section" style="background:#3b1a1a;border:1px solid #7f1d1d;margin-bottom:10px;">
+    <div style="color:#fca5a5;font-weight:600;margin-bottom:6px;">⚠️ 本地历史未备份到数据库，请勿删除！</div>
+    <div style="color:#fcd34d;">本地历史条数：<span id="dbgLocalHistoryCount" style="font-weight:700;">—</span> 条</div>
+    <div style="color:#f9a8d4;margin-top:4px;font-size:.78rem;">数据库尚未初始化（0 bytes），号码列表无备份。请先点击「导出 localStorage JSON」保存数据，再等待数据库就绪后方可清除。</div>
+  </div>
 
   <h4>localStorage 可用性</h4>
   <div class="debug-section">
@@ -807,7 +813,8 @@
       banner.classList.remove('visible');
       badge.className = 'ls-status ok';
       badge.textContent = '🟢 本地存储正常';
-      if (clearBtn)    { clearBtn.disabled    = false; clearBtn.title    = ''; }
+      // clearBtn is intentionally kept disabled until the database is initialized
+      // — do NOT re-enable it here.
       if (provBtn)     { provBtn.disabled      = false; provBtn.title     = ''; }
       if (provSelBtn)  { provSelBtn.disabled   = false; provSelBtn.title  = ''; }
       if (citySelBtn)  { citySelBtn.disabled   = false; citySelBtn.title  = ''; }
@@ -1912,6 +1919,13 @@
     document.getElementById('dbgCityHistory').textContent   = lsValueSummary(CITY_HISTORY_KEY);
     document.getElementById('dbgProvHistory').textContent   = lsValueSummary(PROV_HISTORY_KEY);
     document.getElementById('dbgLocalHistory').textContent  = lsValueSummary(LOCAL_HISTORY_KEY);
+
+    // Update the local-history warning count
+    try {
+      const histCount = getLocalHistory().size;
+      const countEl = document.getElementById('dbgLocalHistoryCount');
+      if (countEl) countEl.textContent = histCount.toLocaleString('zh-CN');
+    } catch (e) { /* ignore */ }
 
     // All keys with sizes
     const allKeysEl = document.getElementById('dbgAllKeys');
