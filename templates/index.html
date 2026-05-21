@@ -466,6 +466,79 @@
     }
     .ls-status.ok   { background: #e6f4ea; color: #1a7a3a; }
     .ls-status.fail { background: #fef2f2; color: #b91c1c; }
+
+    /* ---- 调试面板 ---- */
+    #debugPanel {
+      display: none;
+      background: #1e1e2e;
+      color: #cdd6f4;
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-top: 16px;
+      font-family: "Menlo", "Consolas", "Courier New", monospace;
+      font-size: .82rem;
+      line-height: 1.6;
+      max-width: 1200px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    #debugPanel.visible { display: block; }
+    #debugPanel h3 {
+      font-size: .95rem;
+      font-weight: 700;
+      color: #89b4fa;
+      margin-bottom: 14px;
+      border-bottom: 1px solid #313244;
+      padding-bottom: 8px;
+    }
+    #debugPanel h4 {
+      font-size: .85rem;
+      font-weight: 600;
+      color: #a6e3a1;
+      margin: 14px 0 6px;
+    }
+    .debug-kv {
+      display: grid;
+      grid-template-columns: 220px 1fr;
+      gap: 4px 12px;
+      margin-bottom: 8px;
+    }
+    .debug-kv .dk { color: #f38ba8; }
+    .debug-kv .dv { color: #cdd6f4; word-break: break-all; }
+    .debug-section {
+      background: #181825;
+      border-radius: 6px;
+      padding: 10px 14px;
+      margin-bottom: 10px;
+    }
+    .debug-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 14px;
+    }
+    .debug-actions button {
+      padding: 5px 14px;
+      font-size: .82rem;
+      border: 1px solid #45475a;
+      border-radius: 6px;
+      background: #313244;
+      color: #cdd6f4;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .debug-actions button:hover { background: #45475a; }
+    #debugIssuedResult {
+      margin-top: 10px;
+      max-height: 300px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      background: #181825;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: .78rem;
+      color: #a6e3a1;
+    }
   </style>
 </head>
 <body>
@@ -593,6 +666,7 @@
           <button class="btn-sm" onclick="loadRecentBatches()">🧾 最近批次</button>
           <button class="btn-sm" onclick="copyPhones()">📋 复制号码</button>
           <button class="btn-sm" onclick="downloadCSV()">⬇ 下载 CSV</button>
+          <button class="btn-sm" onclick="toggleDebugPanel()" title="显示/隐藏调试信息面板">🔍 调试信息</button>
           <button class="btn-sm danger" onclick="clearResult()">🗑 清空</button>
         </div>
       </div>
@@ -626,6 +700,58 @@
   </div>
 
 </div><!-- end .layout -->
+
+<!-- ===== 调试面板 ===== -->
+<div id="debugPanel">
+  <h3>🔍 调试信息</h3>
+
+  <h4>localStorage 可用性</h4>
+  <div class="debug-section">
+    <div class="debug-kv">
+      <span class="dk">状态</span>
+      <span class="dv" id="dbgLsAvailable">—</span>
+    </div>
+    <div class="debug-kv">
+      <span class="dk">已存储键数量</span>
+      <span class="dv" id="dbgLsKeyCount">—</span>
+    </div>
+  </div>
+
+  <h4>localStorage 内容</h4>
+  <div class="debug-section">
+    <div class="debug-kv">
+      <span class="dk">CITY_SELECTION_KEY</span>
+      <span class="dv" id="dbgCitySelection">—</span>
+    </div>
+    <div class="debug-kv">
+      <span class="dk">CITY_HISTORY_KEY</span>
+      <span class="dv" id="dbgCityHistory">—</span>
+    </div>
+    <div class="debug-kv">
+      <span class="dk">PROV_HISTORY_KEY</span>
+      <span class="dv" id="dbgProvHistory">—</span>
+    </div>
+    <div class="debug-kv">
+      <span class="dk">LOCAL_HISTORY_KEY</span>
+      <span class="dv" id="dbgLocalHistory">—</span>
+    </div>
+  </div>
+
+  <h4>所有 localStorage 键（含大小）</h4>
+  <div class="debug-section" id="dbgAllKeys">—</div>
+
+  <h4>后端 issued_numbers 表</h4>
+  <div class="debug-section">
+    <div id="dbgIssuedSummary" style="color:#cba6f7;">点击「查询 issued_numbers」加载数据</div>
+    <div id="debugIssuedResult"></div>
+  </div>
+
+  <div class="debug-actions">
+    <button onclick="refreshDebugPanel()">🔄 刷新 localStorage 信息</button>
+    <button onclick="queryIssuedNumbers()">🗄 查询 issued_numbers</button>
+    <button onclick="exportLocalStorageJSON()">📤 导出 localStorage JSON</button>
+  </div>
+</div>
 
 </div><!-- end #mainApp -->
 
@@ -736,25 +862,49 @@
 
   function getCitySelection() {
     try {
-      return JSON.parse(localStorage.getItem(CITY_SELECTION_KEY) || '[]');
+      const raw = localStorage.getItem(CITY_SELECTION_KEY);
+      const parsed = JSON.parse(raw || '[]');
+      console.log('[getCitySelection] key=' + CITY_SELECTION_KEY + ' raw=' + raw + ' parsed=', parsed);
+      return parsed;
     } catch (e) {
+      console.warn('[getCitySelection] 解析失败:', e);
       return [];
     }
   }
 
   function saveCitySelection(cities) {
+    console.log('[saveCitySelection] 保存市区选择:', cities);
     try {
-      localStorage.setItem(CITY_SELECTION_KEY, JSON.stringify(cities));
+      if (!localStorageAvailable) {
+        console.warn('[saveCitySelection] localStorage 不可用，跳过保存');
+        showToast('⚠️ 本地存储不可用，市区选择无法保存');
+        return;
+      }
+      const serialized = JSON.stringify(cities);
+      localStorage.setItem(CITY_SELECTION_KEY, serialized);
+      // Verify the write succeeded by reading back
+      const readBack = localStorage.getItem(CITY_SELECTION_KEY);
+      if (readBack !== serialized) {
+        console.error('[saveCitySelection] 写入验证失败: 写入=' + serialized + ' 读回=' + readBack);
+        showToast('⚠️ 市区选择保存验证失败，请检查浏览器存储设置');
+      } else {
+        console.log('[saveCitySelection] 写入验证成功，已保存 ' + cities.length + ' 个市区');
+      }
     } catch (e) {
-      console.warn('[localStorage] saveCitySelection 失败:', e);
+      console.error('[saveCitySelection] 保存失败:', e);
+      const reason = e && e.name === 'QuotaExceededError'
+        ? '本地存储空间已满，市区选择未能保存'
+        : `市区选择保存失败（${e && e.name || '未知错误'}）`;
+      showToast('⚠️ ' + reason);
     }
   }
 
   function clearCitySelection() {
     try {
       localStorage.removeItem(CITY_SELECTION_KEY);
+      console.log('[clearCitySelection] 已清除市区选择');
     } catch (e) {
-      console.warn('[localStorage] clearCitySelection 失败:', e);
+      console.warn('[clearCitySelection] 清除失败:', e);
     }
   }
 
@@ -1046,10 +1196,18 @@
 
     // Collect all cities for selected provinces (restore from localStorage, fall back to DOM)
     const savedCities = getCitySelection();
+    const domSelected = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
+    if (savedCities.length > 0) {
+      console.log('[updateCityPanel] 从 localStorage 恢复市区选择 (' + savedCities.length + '):', savedCities);
+    } else if (domSelected.length > 0) {
+      console.log('[updateCityPanel] localStorage 无记录，从 DOM 恢复市区选择 (' + domSelected.length + '):', domSelected);
+    } else {
+      console.log('[updateCityPanel] 无已保存的市区选择（localStorage 和 DOM 均为空）');
+    }
     const prevSelected = new Set(
       savedCities.length > 0
         ? savedCities
-        : [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city)
+        : domSelected
     );
 
     // Build union of cities across all selected provinces, sorted
@@ -1077,9 +1235,14 @@
   }
 
   function toggleCity(tag) {
+    const city = tag.dataset.city;
+    const wasActive = tag.classList.contains('active');
     tag.classList.toggle('active');
+    const nowActive = tag.classList.contains('active');
+    console.log('[toggleCity] city=' + city + ' ' + (wasActive ? 'deselected' : 'selected'));
     updateCityCount();
     const selected = [...document.querySelectorAll('#cityGroup .op-tag.active')].map(t => t.dataset.city);
+    console.log('[toggleCity] 当前已选市区 (' + selected.length + '):', selected);
     saveCitySelection(selected);
   }
 
@@ -1442,6 +1605,133 @@
     t.textContent = msg;
     t.classList.add('show');
     setTimeout(() => t.classList.remove('show'), 2200);
+  }
+
+  // ---------- 调试面板 ----------
+  function toggleDebugPanel() {
+    const panel = document.getElementById('debugPanel');
+    const isVisible = panel.classList.toggle('visible');
+    if (isVisible) {
+      refreshDebugPanel();
+      console.log('[debugPanel] 调试面板已打开');
+    } else {
+      console.log('[debugPanel] 调试面板已关闭');
+    }
+  }
+
+  function lsValueSummary(key) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (raw === null) return '(未设置)';
+      const bytes = new Blob([raw]).size;
+      const preview = raw.length > 120 ? raw.slice(0, 120) + '…' : raw;
+      return `${preview}  [${bytes} bytes]`;
+    } catch (e) {
+      return '(读取失败: ' + (e && e.message || e) + ')';
+    }
+  }
+
+  function refreshDebugPanel() {
+    // localStorage availability
+    const lsOk = checkLocalStorage();
+    document.getElementById('dbgLsAvailable').textContent =
+      lsOk ? '✅ 可用' : '❌ 不可用';
+
+    // Key count
+    let keyCount = 0;
+    try { keyCount = localStorage.length; } catch (e) { keyCount = -1; }
+    document.getElementById('dbgLsKeyCount').textContent = keyCount >= 0 ? keyCount + ' 个' : '(读取失败)';
+
+    // Known keys
+    document.getElementById('dbgCitySelection').textContent = lsValueSummary(CITY_SELECTION_KEY);
+    document.getElementById('dbgCityHistory').textContent   = lsValueSummary(CITY_HISTORY_KEY);
+    document.getElementById('dbgProvHistory').textContent   = lsValueSummary(PROV_HISTORY_KEY);
+    document.getElementById('dbgLocalHistory').textContent  = lsValueSummary(LOCAL_HISTORY_KEY);
+
+    // All keys with sizes
+    const allKeysEl = document.getElementById('dbgAllKeys');
+    try {
+      if (localStorage.length === 0) {
+        allKeysEl.textContent = '(localStorage 为空)';
+      } else {
+        const lines = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          const v = localStorage.getItem(k) || '';
+          const bytes = new Blob([v]).size;
+          lines.push(`${k}  →  ${bytes} bytes`);
+        }
+        allKeysEl.innerHTML = lines.map(l =>
+          `<div class="debug-kv"><span class="dk">${l.split('  →  ')[0]}</span><span class="dv">${l.split('  →  ')[1]}</span></div>`
+        ).join('');
+      }
+    } catch (e) {
+      allKeysEl.textContent = '(读取失败: ' + (e && e.message || e) + ')';
+    }
+
+    console.log('[refreshDebugPanel] localStorage 状态已刷新');
+  }
+
+  async function queryIssuedNumbers() {
+    const summaryEl = document.getElementById('dbgIssuedSummary');
+    const resultEl  = document.getElementById('debugIssuedResult');
+    summaryEl.textContent = '⏳ 查询中…';
+    resultEl.textContent  = '';
+    try {
+      const res  = await fetch('/api/debug/issued-numbers');
+      const data = await res.json();
+      if (!res.ok) {
+        summaryEl.textContent = '❌ 查询失败: ' + (data.error || res.status);
+        return;
+      }
+      summaryEl.innerHTML =
+        `总计: <strong style="color:#a6e3a1">${data.total_count.toLocaleString()}</strong> 条` +
+        `  |  DB 文件: ${data.db_file}` +
+        `  |  大小: ${(data.db_size_bytes / 1024).toFixed(1)} KB`;
+
+      const lines = [];
+      lines.push('=== 按省份 (Top 30) ===');
+      (data.by_province || []).forEach(r => lines.push(`  ${r.province}: ${r.cnt.toLocaleString()}`));
+      lines.push('');
+      lines.push('=== 按城市 (Top 30) ===');
+      (data.by_city || []).forEach(r => lines.push(`  ${r.city}: ${r.cnt.toLocaleString()}`));
+      lines.push('');
+      lines.push('=== 最近 100 条 ===');
+      (data.recent_100 || []).forEach(r =>
+        lines.push(`  ${r.phone}  ${r.province}/${r.city}  ${r.operator}  ${r.created_at}  batch=${r.batch_id || '-'}`)
+      );
+      resultEl.textContent = lines.join('\n');
+      console.log('[queryIssuedNumbers] total_count=', data.total_count, 'by_province=', data.by_province);
+    } catch (e) {
+      summaryEl.textContent = '❌ 请求失败: ' + (e && e.message || e);
+      console.error('[queryIssuedNumbers] 失败:', e);
+    }
+  }
+
+  function exportLocalStorageJSON() {
+    try {
+      const dump = {};
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        try {
+          dump[k] = JSON.parse(localStorage.getItem(k));
+        } catch (_) {
+          dump[k] = localStorage.getItem(k);
+        }
+      }
+      const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = `localStorage_dump_${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('localStorage 已导出为 JSON');
+      console.log('[exportLocalStorageJSON] 已导出', Object.keys(dump).length, '个键');
+    } catch (e) {
+      showToast('导出失败: ' + (e && e.message || e));
+      console.error('[exportLocalStorageJSON] 失败:', e);
+    }
   }
 </script>
 </body>

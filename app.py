@@ -6,6 +6,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 import random
 import sqlite3
@@ -18,6 +19,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from flask import Flask, Response, jsonify, render_template, request, session
+
+# Configure module-level logger
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+)
+logger = logging.getLogger("phone_tool")
 
 DATA_FILE = Path(__file__).parent / "data" / "phone_segments.csv"
 ISSUED_DB_FILE = Path(__file__).parent / "data" / "issued_numbers.db"
@@ -416,6 +425,11 @@ def api_generate():
     created_at = datetime.now(timezone.utc).isoformat()
     batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
 
+    logger.info(
+        "[generate] batch=%s requested=%d mode=%s provinces=%s cities=%s suffix_digits=%d",
+        batch_id, count, mode, provinces, cities, suffix_digits,
+    )
+
     # Open a single connection for the entire generation loop so we can check
     # issued_numbers globally (across all users/browsers/requests) before
     # accepting each candidate number.
@@ -423,12 +437,26 @@ def api_generate():
         gen_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():
+            logger.error("[generate] batch=%s DB locked on connect", batch_id)
             return jsonify({"error": "数据库繁忙，请稍后重试"}), 503
         raise
     try:
         gen_conn.execute("PRAGMA journal_mode=WAL")
         gen_conn.execute("PRAGMA busy_timeout=30000")
 
+        # Log current issued_numbers count before generation
+        try:
+            issued_count_before = gen_conn.execute(
+                "SELECT COUNT(*) FROM issued_numbers"
+            ).fetchone()[0]
+            logger.info(
+                "[generate] batch=%s issued_numbers table has %d rows before generation",
+                batch_id, issued_count_before,
+            )
+        except sqlite3.OperationalError as exc:
+            logger.warning("[generate] batch=%s could not query issued_numbers: %s", batch_id, exc)
+
+        global_dedup_hits = 0
         for _ in range(max_attempts):
             if len(results) >= count:
                 break
@@ -445,6 +473,7 @@ def api_generate():
                 "SELECT 1 FROM issued_numbers WHERE phone = ?", (phone,)
             ).fetchone()
             if existing:
+                global_dedup_hits += 1
                 continue
 
             seen.add(phone)
@@ -458,6 +487,11 @@ def api_generate():
                 "city":     seg_info["city"],
                 "operator": seg_info["operator"],
             })
+
+        logger.info(
+            "[generate] batch=%s generated=%d global_dedup_hits=%d",
+            batch_id, len(results), global_dedup_hits,
+        )
 
         # Persist batch metadata, issued numbers, and batch-number mapping
         try:
@@ -484,6 +518,10 @@ def api_generate():
 
             if results:
                 # Insert into global issued_numbers for permanent cross-request dedup
+                logger.info(
+                    "[generate] batch=%s inserting %d rows into issued_numbers",
+                    batch_id, len(results),
+                )
                 gen_conn.executemany(
                     """
                     INSERT OR IGNORE INTO issued_numbers(phone, province, city, operator, created_at, batch_id)
@@ -520,9 +558,12 @@ def api_generate():
                     ],
                 )
             gen_conn.commit()
+            logger.info("[generate] batch=%s committed to DB successfully", batch_id)
         except sqlite3.OperationalError as exc:
             if "database is locked" in str(exc).lower():
+                logger.error("[generate] batch=%s DB locked during INSERT: %s", batch_id, exc)
                 return jsonify({"error": "数据库繁忙，请稍后重试"}), 503
+            logger.error("[generate] batch=%s DB error during INSERT: %s", batch_id, exc)
             raise
     finally:
         gen_conn.close()
@@ -634,6 +675,18 @@ def api_generate_bulk_export():
             bulk_conn.execute("PRAGMA journal_mode=WAL")
             bulk_conn.execute("PRAGMA busy_timeout=30000")
 
+            # Log issued_numbers count at start of bulk export
+            try:
+                issued_count_before = bulk_conn.execute(
+                    "SELECT COUNT(*) FROM issued_numbers"
+                ).fetchone()[0]
+                logger.info(
+                    "[bulk-export] total_count=%d issued_numbers table has %d rows at start",
+                    total_count, issued_count_before,
+                )
+            except sqlite3.OperationalError as exc:
+                logger.warning("[bulk-export] could not query issued_numbers: %s", exc)
+
             while remaining > 0:
                 request_count = min(batch_size, remaining)
                 results: list[dict] = []
@@ -642,6 +695,12 @@ def api_generate_bulk_export():
                 created_at = datetime.now(timezone.utc).isoformat()
                 batch_id = f"B{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}{uuid4().hex[:8]}"
 
+                logger.info(
+                    "[bulk-export] batch=%s request_count=%d remaining=%d",
+                    batch_id, request_count, remaining,
+                )
+
+                global_dedup_hits = 0
                 for _ in range(max_attempts):
                     if len(results) >= request_count:
                         break
@@ -659,6 +718,7 @@ def api_generate_bulk_export():
                         "SELECT 1 FROM issued_numbers WHERE phone = ?", (phone,)
                     ).fetchone()
                     if existing:
+                        global_dedup_hits += 1
                         continue
 
                     seen_batch.add(phone)
@@ -674,6 +734,11 @@ def api_generate_bulk_export():
                         "operator": seg_info["operator"],
                     }
                     results.append(row)
+
+                logger.info(
+                    "[bulk-export] batch=%s generated=%d global_dedup_hits=%d",
+                    batch_id, len(results), global_dedup_hits,
+                )
 
                 try:
                     bulk_conn.execute(
@@ -699,6 +764,10 @@ def api_generate_bulk_export():
 
                     if results:
                         # Insert into global issued_numbers for permanent cross-request dedup
+                        logger.info(
+                            "[bulk-export] batch=%s inserting %d rows into issued_numbers",
+                            batch_id, len(results),
+                        )
                         bulk_conn.executemany(
                             """
                             INSERT OR IGNORE INTO issued_numbers(phone, province, city, operator, created_at, batch_id)
@@ -735,11 +804,18 @@ def api_generate_bulk_export():
                             ],
                         )
                     bulk_conn.commit()
+                    logger.info("[bulk-export] batch=%s committed to DB successfully", batch_id)
                 except sqlite3.OperationalError as exc:
                     if "database is locked" in str(exc).lower():
+                        logger.error(
+                            "[bulk-export] batch=%s DB locked during INSERT: %s", batch_id, exc
+                        )
                         # Yield nothing further; the client will receive a truncated
                         # CSV — the HTTP headers are already sent at this point.
                         return
+                    logger.error(
+                        "[bulk-export] batch=%s DB error during INSERT: %s", batch_id, exc
+                    )
                     raise
 
                 for row in results:
@@ -884,6 +960,84 @@ def api_batch_export(batch_id: str):
             "Content-Disposition": f'attachment; filename="batch_{batch_id}.csv"'
         },
     )
+
+
+@app.get("/api/debug/issued-numbers")
+def api_debug_issued_numbers():
+    """Debug endpoint: inspect the issued_numbers table state."""
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
+    conn = sqlite3.connect(ISSUED_DB_FILE, timeout=10)
+    conn.row_factory = sqlite3.Row
+    try:
+        # Total count
+        total_count = conn.execute("SELECT COUNT(*) FROM issued_numbers").fetchone()[0]
+
+        # Count by province (top 30)
+        by_province = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT province, COUNT(*) AS cnt
+                FROM issued_numbers
+                GROUP BY province
+                ORDER BY cnt DESC
+                LIMIT 30
+                """
+            ).fetchall()
+        ]
+
+        # Count by city (top 30)
+        by_city = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT city, COUNT(*) AS cnt
+                FROM issued_numbers
+                GROUP BY city
+                ORDER BY cnt DESC
+                LIMIT 30
+                """
+            ).fetchall()
+        ]
+
+        # Most recent 100 issued numbers
+        recent = [
+            dict(r)
+            for r in conn.execute(
+                """
+                SELECT phone, province, city, operator, created_at, batch_id
+                FROM issued_numbers
+                ORDER BY created_at DESC
+                LIMIT 100
+                """
+            ).fetchall()
+        ]
+
+        # DB file size on disk
+        try:
+            db_size_bytes = ISSUED_DB_FILE.stat().st_size
+        except OSError:
+            db_size_bytes = -1
+
+    except sqlite3.OperationalError as exc:
+        logger.error("[debug/issued-numbers] DB error: %s", exc)
+        return jsonify({"error": f"数据库查询失败: {exc}"}), 500
+    finally:
+        conn.close()
+
+    logger.info("[debug/issued-numbers] queried: total=%d", total_count)
+
+    return jsonify({
+        "total_count": total_count,
+        "db_file": str(ISSUED_DB_FILE),
+        "db_size_bytes": db_size_bytes,
+        "by_province": by_province,
+        "by_city": by_city,
+        "recent_100": recent,
+    })
 
 
 if __name__ == "__main__":
