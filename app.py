@@ -44,6 +44,39 @@ app.secret_key = os.getenv("SECRET_KEY", "phone-tool-secret-key-change-in-prod")
 LOGIN_PASSWORD = "xiaozhangnb"
 
 # --------------------------------------------------------------------------- #
+# In-memory issued-numbers cache (for O(1) dedup during generation)
+# --------------------------------------------------------------------------- #
+
+# Global set of every phone number already stored in issued_numbers.
+# Populated lazily on the first generation request and kept in sync after
+# every successful INSERT so that subsequent requests never need to hit the
+# DB for individual existence checks.
+_issued_numbers_cache: set[str] = set()
+_cache_loaded: bool = False
+
+
+def _load_issued_numbers_cache() -> None:
+    """Load all phone numbers from issued_numbers into the in-memory cache.
+
+    This is a one-time cost at first use.  After loading, all dedup checks
+    during number generation are O(1) in-memory set lookups instead of
+    individual SQLite queries.
+    """
+    global _issued_numbers_cache, _cache_loaded
+    logger.info("[cache] loading issued_numbers into memory …")
+    try:
+        conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
+        try:
+            rows = conn.execute("SELECT phone FROM issued_numbers").fetchall()
+            _issued_numbers_cache = {row[0] for row in rows}
+            _cache_loaded = True
+            logger.info("[cache] loaded %d numbers into memory cache", len(_issued_numbers_cache))
+        finally:
+            conn.close()
+    except sqlite3.OperationalError as exc:
+        logger.error("[cache] failed to load issued_numbers cache: %s", exc)
+
+# --------------------------------------------------------------------------- #
 # 数据加载（启动时一次性读入内存）
 # --------------------------------------------------------------------------- #
 
@@ -658,9 +691,14 @@ def api_generate():
         batch_id, count, mode, provinces, cities, suffix_digits,
     )
 
-    # Open a single connection for the entire generation loop so we can check
-    # issued_numbers globally (across all users/browsers/requests) before
-    # accepting each candidate number.
+    # Ensure the in-memory cache is populated before entering the generation
+    # loop so that all dedup checks are O(1) set lookups rather than
+    # individual SQLite queries.
+    if not _cache_loaded:
+        _load_issued_numbers_cache()
+
+    # Open a single connection for the entire generation loop (used only for
+    # the INSERT phase; existence checks now use the in-memory cache).
     try:
         gen_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
     except sqlite3.OperationalError as exc:
@@ -672,17 +710,10 @@ def api_generate():
         gen_conn.execute("PRAGMA journal_mode=WAL")
         gen_conn.execute("PRAGMA busy_timeout=30000")
 
-        # Log current issued_numbers count before generation
-        try:
-            issued_count_before = gen_conn.execute(
-                "SELECT COUNT(*) FROM issued_numbers"
-            ).fetchone()[0]
-            logger.info(
-                "[generate] batch=%s issued_numbers table has %d rows before generation",
-                batch_id, issued_count_before,
-            )
-        except sqlite3.OperationalError as exc:
-            logger.warning("[generate] batch=%s could not query issued_numbers: %s", batch_id, exc)
+        logger.info(
+            "[generate] batch=%s in-memory cache has %d numbers",
+            batch_id, len(_issued_numbers_cache),
+        )
 
         global_dedup_hits = 0
         for _ in range(max_attempts):
@@ -696,11 +727,8 @@ def api_generate():
             if unique and phone in seen:
                 continue
 
-            # Global dedup: skip numbers already issued in any previous request
-            existing = gen_conn.execute(
-                "SELECT 1 FROM issued_numbers WHERE phone = ?", (phone,)
-            ).fetchone()
-            if existing:
+            # Global dedup: check in-memory cache (O(1)) instead of querying DB
+            if phone in _issued_numbers_cache:
                 global_dedup_hits += 1
                 continue
 
@@ -819,6 +847,21 @@ def api_generate():
                 )
             gen_conn.commit()
             logger.info("[generate] batch=%s committed to DB successfully", batch_id)
+
+            # Update in-memory cache with the newly inserted numbers so future
+            # requests see them without a DB round-trip.
+            if _cache_loaded and results:
+                for row in results:
+                    stored_phone = (
+                        row["phone"][2:]
+                        if row["province"] not in NON_MAINLAND_REGIONS
+                        else row["phone"]
+                    )
+                    _issued_numbers_cache.add(stored_phone)
+                logger.info(
+                    "[generate] batch=%s cache updated, new size=%d",
+                    batch_id, len(_issued_numbers_cache),
+                )
         except sqlite3.OperationalError as exc:
             if "database is locked" in str(exc).lower():
                 logger.error("[generate] batch=%s DB locked during INSERT: %s", batch_id, exc)
@@ -927,25 +970,22 @@ def api_generate_bulk_export():
     def csv_stream():
         yield "\ufeffphone,province,city,operator\n"
 
+        # Ensure the in-memory cache is populated before the generation loop.
+        if not _cache_loaded:
+            _load_issued_numbers_cache()
+
         remaining = total_count
-        # Reuse one DB connection for the entire streaming export so that numbers
-        # inserted in earlier batches are visible when checking later batches.
+        # Reuse one DB connection for the entire streaming export (INSERT only;
+        # existence checks now use the in-memory cache).
         bulk_conn = sqlite3.connect(ISSUED_DB_FILE, timeout=30)
         try:
             bulk_conn.execute("PRAGMA journal_mode=WAL")
             bulk_conn.execute("PRAGMA busy_timeout=30000")
 
-            # Log issued_numbers count at start of bulk export
-            try:
-                issued_count_before = bulk_conn.execute(
-                    "SELECT COUNT(*) FROM issued_numbers"
-                ).fetchone()[0]
-                logger.info(
-                    "[bulk-export] total_count=%d issued_numbers table has %d rows at start",
-                    total_count, issued_count_before,
-                )
-            except sqlite3.OperationalError as exc:
-                logger.warning("[bulk-export] could not query issued_numbers: %s", exc)
+            logger.info(
+                "[bulk-export] total_count=%d in-memory cache has %d numbers at start",
+                total_count, len(_issued_numbers_cache),
+            )
 
             while remaining > 0:
                 request_count = min(batch_size, remaining)
@@ -973,11 +1013,8 @@ def api_generate_bulk_export():
                     if unique and (phone in seen_batch or phone in global_seen):
                         continue
 
-                    # Global dedup: skip numbers already issued in any previous request
-                    existing = bulk_conn.execute(
-                        "SELECT 1 FROM issued_numbers WHERE phone = ?", (phone,)
-                    ).fetchone()
-                    if existing:
+                    # Global dedup: check in-memory cache (O(1)) instead of querying DB
+                    if phone in _issued_numbers_cache:
                         global_dedup_hits += 1
                         continue
 
@@ -1100,6 +1137,20 @@ def api_generate_bulk_export():
                         )
                     bulk_conn.commit()
                     logger.info("[bulk-export] batch=%s committed to DB successfully", batch_id)
+
+                    # Update in-memory cache with the newly inserted numbers.
+                    if _cache_loaded and results:
+                        for row in results:
+                            stored_phone = (
+                                row["phone"][2:]
+                                if row["province"] not in NON_MAINLAND_REGIONS
+                                else row["phone"]
+                            )
+                            _issued_numbers_cache.add(stored_phone)
+                        logger.info(
+                            "[bulk-export] batch=%s cache updated, new size=%d",
+                            batch_id, len(_issued_numbers_cache),
+                        )
                 except sqlite3.OperationalError as exc:
                     if "database is locked" in str(exc).lower():
                         logger.error(
@@ -1451,6 +1502,36 @@ def api_admin_rebuild_stats():
     )
 
     return jsonify(summary)
+
+
+@app.post("/api/admin/refresh-cache")
+def api_admin_refresh_cache():
+    """Admin endpoint: reload the in-memory issued-numbers cache from the DB.
+
+    Useful when the cache may have drifted out of sync (e.g. after a direct
+    database import or a multi-process deployment where another worker inserted
+    numbers that this worker's cache does not yet know about).
+
+    Requires authentication.
+    """
+    auth_err = require_auth()
+    if auth_err:
+        return auth_err
+
+    old_size = len(_issued_numbers_cache)
+    _load_issued_numbers_cache()
+    new_size = len(_issued_numbers_cache)
+
+    logger.info(
+        "[admin/refresh-cache] cache refreshed: old_size=%d new_size=%d",
+        old_size, new_size,
+    )
+
+    return jsonify({
+        "ok": True,
+        "old_size": old_size,
+        "new_size": new_size,
+    })
 
 
 if __name__ == "__main__":
